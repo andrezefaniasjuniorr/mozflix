@@ -1,0 +1,6 @@
+{
+  "name": "MozFlix",
+  "description": "Plataforma de streaming moçambicana com filmes, séries, canais e documentários, gestão de pacotes via PIN e M-Pesa/e-Mola, downloads offline e painel administrativo completo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

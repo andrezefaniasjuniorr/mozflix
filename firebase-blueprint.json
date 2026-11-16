@@ -1,0 +1,210 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Utilizador MozFlix com bloqueio por dispositivo e estado do pacote.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "phone": { "type": "string", "maxLength": 32 },
+        "email": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" },
+        "currentPackage": { "type": "string" },
+        "packageExpiresAt": { "type": "string", "format": "date-time" },
+        "activePackageId": { "type": "string" },
+        "activePackageExpiresAt": { "type": "string", "format": "date-time" },
+        "includeAllContent": { "type": "boolean" },
+        "lastRedeemedPin": { "type": "string" },
+        "singleVideoId": { "type": "string" },
+        "deviceId": { "type": "string", "maxLength": 128 },
+        "activeSessionToken": { "type": "string", "maxLength": 128 },
+        "isBlocked": { "type": "boolean" },
+        "isAdmin": { "type": "boolean" }
+      },
+      "required": ["phone", "email", "isBlocked", "isAdmin"]
+    },
+    "VideoItem": {
+      "title": "VideoItem",
+      "description": "Metadados públicos de catálogo sem exposição do link de streaming.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 140 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "category": { "type": "string", "enum": ["Filme", "Série", "Canal", "Documentário"] },
+        "coverUrl": { "type": "string", "maxLength": 400000 },
+        "duration": { "type": "string", "maxLength": 32 },
+        "individualPriceMt": { "type": "number" },
+        "isFreeTrailer": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "featured": { "type": "boolean" },
+        "views": { "type": "number" }
+      },
+      "required": ["title", "description", "category", "coverUrl", "duration", "individualPriceMt", "isFreeTrailer", "active", "views"]
+    },
+    "VideoSource": {
+      "title": "VideoSource",
+      "description": "Cofre isolado de links de stream acessível apenas a administradores e clientes com acesso ativo.",
+      "type": "object",
+      "properties": {
+        "videoId": { "type": "string" },
+        "videoUrl": { "type": "string", "maxLength": 1000 },
+        "videoStoragePath": { "type": "string", "maxLength": 500 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["videoId", "videoUrl"]
+    },
+    "AdminPackage": {
+      "title": "AdminPackage",
+      "description": "Pacote personalizado criado pelo administrador com duração, preço e conteúdos selecionados.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "durationHours": { "type": "number" },
+        "priceMt": { "type": "number" },
+        "includeAllContent": { "type": "boolean" },
+        "videoIds": { "type": "array", "items": { "type": "string" } },
+        "active": { "type": "boolean" }
+      },
+      "required": ["name", "durationHours", "priceMt", "includeAllContent", "videoIds", "active"]
+    },
+    "PinCode": {
+      "title": "PinCode",
+      "description": "Código PIN de ativação única e exclusiva para um conteúdo ou pacote.",
+      "type": "object",
+      "properties": {
+        "codigo": { "type": "string", "maxLength": 32 },
+        "targetType": { "type": "string", "enum": ["content", "package"] },
+        "packageId": { "type": "string" },
+        "packageName": { "type": "string" },
+        "tipoPacote": { "type": "string" },
+        "includeAllContent": { "type": "boolean" },
+        "videoIds": { "type": "array", "items": { "type": "string" } },
+        "duracaoHoras": { "type": "number" },
+        "precoMt": { "type": "number" },
+        "usado": { "type": "boolean" },
+        "usadoPor": { "type": "string" },
+        "usedDeviceId": { "type": "string" },
+        "desativado": { "type": "boolean" }
+      },
+      "required": ["codigo", "tipoPacote", "duracaoHoras", "precoMt", "usado", "desativado"]
+    },
+    "SecurityAlert": {
+      "title": "SecurityAlert",
+      "description": "Registo de tentativas de fraude, força bruta de PIN e bloqueio por 2º dispositivo.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["DEVICE_LOCK", "BLOCKED_ACCESS", "PIN_BRUTE_FORCE"] },
+        "userId": { "type": "string" },
+        "userContact": { "type": "string" },
+        "deviceId": { "type": "string" },
+        "details": { "type": "string" }
+      },
+      "required": ["type", "userId", "userContact", "details"]
+    },
+    "ManualPayment": {
+      "title": "ManualPayment",
+      "description": "Ativações manuais M-Pesa / e-Mola pelo admin.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "telefone": { "type": "string" },
+        "pacote": { "type": "string" },
+        "valorMt": { "type": "number" },
+        "transacaoId": { "type": "string" }
+      },
+      "required": ["userId", "telefone", "pacote", "valorMt", "transacaoId"]
+    },
+    "AdminLog": {
+      "title": "AdminLog",
+      "description": "Registo de auditoria do painel admin.",
+      "type": "object",
+      "properties": {
+        "adminUid": { "type": "string" },
+        "adminEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" }
+      },
+      "required": ["adminUid", "action", "details"]
+    },
+    "AppSettings": {
+      "title": "AppSettings",
+      "description": "Definições globais do MozFlix.",
+      "type": "object",
+      "properties": {
+        "appName": { "type": "string" },
+        "primaryColor": { "type": "string" },
+        "supportWhatsapp": { "type": "string" },
+        "downloadsEnabled": { "type": "boolean" }
+      },
+      "required": ["appName", "primaryColor", "supportWhatsapp", "downloadsEnabled"]
+    },
+    "WatchSession": {
+      "title": "WatchSession",
+      "description": "Sessão de visualização em tempo real.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "videoId": { "type": "string" },
+        "videoTitle": { "type": "string" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["userId", "videoId", "videoTitle", "isActive"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Perfis de utilizadores e bloqueio de dispositivo."
+    },
+    "/users/{userId}/unlockedVideos/{videoId}": {
+      "schema": { "type": "object" },
+      "description": "Vídeos/canais individuais desbloqueados por PIN."
+    },
+    "/users/{userId}/entitlements/{entitlementId}": {
+      "schema": { "type": "object" },
+      "description": "Histórico e validade de pacotes e conteúdos desbloqueados."
+    },
+    "/packages/{packageId}": {
+      "schema": { "$ref": "#/entities/AdminPackage" },
+      "description": "Pacotes personalizados geridos pelo administrador."
+    },
+    "/videos/{videoId}": {
+      "schema": { "$ref": "#/entities/VideoItem" },
+      "description": "Catálogo público (capa, sinopse, categoria, duração)."
+    },
+    "/videoSources/{videoId}": {
+      "schema": { "$ref": "#/entities/VideoSource" },
+      "description": "Cofre secreto de links de streaming."
+    },
+    "/pins/{pinId}": {
+      "schema": { "$ref": "#/entities/PinCode" },
+      "description": "Códigos PIN únicos e anti-fraude."
+    },
+    "/pinAttempts/{userId}": {
+      "schema": { "type": "object" },
+      "description": "Controlo anti-força bruta de tentativas falhadas de PIN."
+    },
+    "/securityAlerts/{alertId}": {
+      "schema": { "$ref": "#/entities/SecurityAlert" },
+      "description": "Alertas de tentativas de burla e partilha de dispositivo."
+    },
+    "/manualPayments/{paymentId}": {
+      "schema": { "$ref": "#/entities/ManualPayment" },
+      "description": "Registos de pagamentos manuais."
+    },
+    "/adminLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AdminLog" },
+      "description": "Registos de ações administrativas."
+    },
+    "/appSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppSettings" },
+      "description": "Definições da plataforma."
+    },
+    "/watchSessions/{userId}": {
+      "schema": { "$ref": "#/entities/WatchSession" },
+      "description": "Sessões ativas de reprodução."
+    }
+  }
+}

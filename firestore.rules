@@ -1,0 +1,407 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Bloqueio global por defeito
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email != null &&
+         request.auth.token.email.lower() == 'mozflix@gmail.com') ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isAdmin', false) == true &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isBlocked', false) != true)
+      );
+    }
+
+    function isNotBlocked() {
+      return isSignedIn() &&
+        (!exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isBlocked', false) != true);
+    }
+
+    function isNotPinRateLimited() {
+      return !exists(/databases/$(database)/documents/pinAttempts/$(request.auth.uid)) ||
+        get(/databases/$(database)/documents/pinAttempts/$(request.auth.uid)).data.get('blockedUntilMs', 0) <= request.time.toMillis();
+    }
+
+    function maxAllowedExpiry(existingExp, hours) {
+      return (existingExp != null && existingExp > request.time
+        ? existingExp.toMillis()
+        : request.time.toMillis()) + (hours * 3600000) + 180000;
+    }
+
+    function isPinRedeemingNow(pinCode) {
+      return pinCode is string &&
+        pinCode.size() >= 4 &&
+        pinCode.size() <= 32 &&
+        exists(/databases/$(database)/documents/pins/$(pinCode)) &&
+        get(/databases/$(database)/documents/pins/$(pinCode)).data.usado == false &&
+        get(/databases/$(database)/documents/pins/$(pinCode)).data.desativado == false &&
+        get(/databases/$(database)/documents/pins/$(pinCode)).data.expiraEm > request.time &&
+        getAfter(/databases/$(database)/documents/pins/$(pinCode)).data.usado == true &&
+        getAfter(/databases/$(database)/documents/pins/$(pinCode)).data.usadoPor == request.auth.uid;
+    }
+
+    // Validação estrita no servidor (request.time) para impedir burlas de relógio e partilha
+    function hasActivePackageInDb(videoId) {
+      let u = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        u.get('isBlocked', false) != true && (
+          // 1. Pacote com acesso global a todo o catálogo
+          (u.get('includeAllContent', false) == true &&
+           u.get('packageExpiresAt', null) != null &&
+           u.packageExpiresAt > request.time) ||
+          // 2. Pacote personalizado ativo que inclui este título
+          (u.get('activePackageId', null) != null &&
+           u.get('activePackageExpiresAt', null) != null &&
+           u.activePackageExpiresAt > request.time &&
+           exists(/databases/$(database)/documents/packages/$(u.activePackageId)) &&
+           videoId in get(/databases/$(database)/documents/packages/$(u.activePackageId)).data.videoIds) ||
+          // 3. Conteúdo desbloqueado por código PIN exclusivo (filme/série/canal ou lista do pacote)
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)/unlockedVideos/$(videoId)) &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)/unlockedVideos/$(videoId)).data.expiresAt > request.time) ||
+          // 4. Compatibilidade com formato legado
+          (u.get('currentPackage', null) != null &&
+           u.get('packageExpiresAt', null) != null &&
+           u.packageExpiresAt > request.time &&
+           (u.get('currentPackage', '') != 'Por Filme' || u.get('singleVideoId', null) == videoId))
+        );
+    }
+
+    function isValidUserCreate(data) {
+      return data.keys().hasAll(['phone', 'email', 'isBlocked', 'isAdmin']) &&
+        data.keys().hasOnly([
+          'uid', 'phone', 'email', 'createdAt', 'lastLoginAt',
+          'currentPackage', 'packageExpiresAt', 'activePackageId',
+          'activePackageExpiresAt', 'includeAllContent', 'lastRedeemedPin',
+          'singleVideoId', 'deviceId', 'activeSessionToken', 'isBlocked', 'isAdmin'
+        ]) &&
+        data.phone is string && data.phone.size() <= 32 &&
+        data.email is string && data.email.size() <= 160 &&
+        data.isBlocked == false &&
+        data.isAdmin == false &&
+        data.currentPackage == null &&
+        data.packageExpiresAt == null &&
+        (!('deviceId' in data) || data.deviceId == null || (data.deviceId is string && data.deviceId.size() <= 128));
+    }
+
+    function isValidVideo(data) {
+      return data.keys().hasAll([
+          'title', 'description', 'category', 'coverUrl',
+          'duration', 'individualPriceMt', 'isFreeTrailer', 'active', 'views'
+        ]) &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 140 &&
+        data.description is string && data.description.size() <= 4000 &&
+        data.category in ['Filme', 'Série', 'Canal', 'Documentário'] &&
+        data.coverUrl is string && data.coverUrl.size() <= 400000 &&
+        (!('videoUrl' in data) || (data.videoUrl is string && data.videoUrl.size() <= 1000)) &&
+        data.duration is string && data.duration.size() <= 32 &&
+        data.individualPriceMt is number && data.individualPriceMt >= 0 &&
+        data.isFreeTrailer is bool &&
+        data.active is bool &&
+        data.views is number && data.views >= 0;
+    }
+
+    function isValidPackage(data) {
+      return data.keys().hasAll([
+          'name', 'description', 'durationHours', 'priceMt',
+          'includeAllContent', 'videoIds', 'active'
+        ]) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        data.description is string && data.description.size() <= 1000 &&
+        data.durationHours is number && data.durationHours > 0 &&
+        data.priceMt is number && data.priceMt >= 0 &&
+        data.includeAllContent is bool &&
+        data.videoIds is list &&
+        data.active is bool;
+    }
+
+    function isValidPin(data) {
+      return data.keys().hasAll(['codigo', 'tipoPacote', 'duracaoHoras', 'precoMt', 'usado', 'desativado']) &&
+        data.codigo is string && data.codigo.size() >= 4 && data.codigo.size() <= 32 &&
+        data.tipoPacote is string && data.tipoPacote.size() > 0 && data.tipoPacote.size() <= 100 &&
+        data.duracaoHoras is number && data.duracaoHoras > 0 &&
+        data.precoMt is number && data.precoMt >= 0 &&
+        data.usado is bool &&
+        data.desativado is bool;
+    }
+
+    // Teste de ligação
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // Perfis de utilizadores e subcoleções de acessos
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isValidId(userId) && (
+        (isOwner(userId) && isValidUserCreate(incoming())) ||
+        isAdmin()
+      );
+
+      allow update: if isValidId(userId) && (
+        isAdmin() ||
+        (
+          isOwner(userId) &&
+          isNotBlocked() &&
+          incoming().isAdmin == existing().isAdmin &&
+          incoming().isBlocked == existing().isBlocked &&
+          incoming().currentPackage == existing().currentPackage &&
+          incoming().packageExpiresAt == existing().packageExpiresAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['deviceId', 'activeSessionToken', 'lastLoginAt']) &&
+          (existing().get('deviceId', null) == null || existing().get('deviceId', null) == incoming().get('deviceId', null)) &&
+          (incoming().get('deviceId', null) == null || (incoming().deviceId is string && incoming().deviceId.size() <= 128))
+        ) ||
+        (
+          isOwner(userId) &&
+          isNotBlocked() &&
+          incoming().isAdmin == existing().isAdmin &&
+          incoming().isBlocked == existing().isBlocked &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'currentPackage', 'packageExpiresAt', 'activePackageId',
+            'activePackageExpiresAt', 'includeAllContent', 'lastRedeemedPin',
+            'lastPackagePriceMt', 'lastLoginAt'
+          ]) &&
+          isPinRedeemingNow(incoming().get('lastRedeemedPin', '')) &&
+          (
+            incoming().get('packageExpiresAt', null) == existing().get('packageExpiresAt', null) ||
+            incoming().packageExpiresAt.toMillis() <= maxAllowedExpiry(
+              existing().get('packageExpiresAt', null),
+              get(/databases/$(database)/documents/pins/$(incoming().lastRedeemedPin)).data.duracaoHoras
+            )
+          ) &&
+          (
+            incoming().get('activePackageExpiresAt', null) == existing().get('activePackageExpiresAt', null) ||
+            incoming().activePackageExpiresAt.toMillis() <= maxAllowedExpiry(
+              existing().get('activePackageExpiresAt', null),
+              get(/databases/$(database)/documents/pins/$(incoming().lastRedeemedPin)).data.duracaoHoras
+            )
+          )
+        )
+      );
+
+      allow delete: if isValidId(userId) && isAdmin();
+
+      match /notifications/{notifId} {
+        allow get, list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId) && isValidId(notifId) && isAdmin();
+        allow update: if isValidId(userId) && isValidId(notifId) && (isOwner(userId) || isAdmin()) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+        allow delete: if isValidId(userId) && isValidId(notifId) && (isOwner(userId) || isAdmin());
+      }
+
+      match /unlockedVideos/{videoId} {
+        allow get, list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create, update: if isValidId(userId) && isValidId(videoId) && (
+          isAdmin() ||
+          (
+            isOwner(userId) &&
+            isNotBlocked() &&
+            incoming().videoId == videoId &&
+            isPinRedeemingNow(incoming().get('pinCode', '')) &&
+            videoId in get(/databases/$(database)/documents/pins/$(incoming().pinCode)).data.get('videoIds', []) &&
+            incoming().expiresAt is timestamp &&
+            incoming().expiresAt.toMillis() <= maxAllowedExpiry(
+              resource == null ? null : resource.data.get('expiresAt', null),
+              get(/databases/$(database)/documents/pins/$(incoming().pinCode)).data.duracaoHoras
+            )
+          )
+        );
+        allow delete: if isValidId(userId) && isAdmin();
+      }
+
+      match /entitlements/{entitlementId} {
+        allow get, list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isValidId(userId) && isValidId(entitlementId) && (
+          isAdmin() ||
+          (
+            isOwner(userId) &&
+            isNotBlocked() &&
+            incoming().userId == request.auth.uid &&
+            entitlementId == incoming().get('pinCode', '') &&
+            isPinRedeemingNow(incoming().get('pinCode', '')) &&
+            incoming().expiresAt is timestamp &&
+            incoming().expiresAt.toMillis() <= request.time.toMillis() + (get(/databases/$(database)/documents/pins/$(incoming().pinCode)).data.duracaoHoras * 3600000) + 180000
+          )
+        );
+        allow update, delete: if isValidId(userId) && isAdmin();
+      }
+    }
+
+    // Pacotes criados pelo administrador
+    match /packages/{packageId} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isValidId(packageId) && isAdmin() && isValidPackage(incoming());
+      allow delete: if isValidId(packageId) && isAdmin();
+    }
+
+    // Códigos PIN: listagem proibida para utilizadores; resgate único e atómico vinculado ao deviceId
+    match /pins/{pinId} {
+      allow list: if isAdmin();
+      allow get: if isValidId(pinId) && (
+        isAdmin() ||
+        (isSignedIn() && isNotBlocked() && isNotPinRateLimited())
+      );
+      allow create: if isValidId(pinId) && isAdmin() && isValidPin(incoming());
+      allow update: if isValidId(pinId) && (
+        (isAdmin() && isValidPin(incoming())) ||
+        (
+          isSignedIn() &&
+          isNotBlocked() &&
+          isNotPinRateLimited() &&
+          existing().usado == false &&
+          existing().desativado == false &&
+          existing().expiraEm > request.time &&
+          incoming().usado == true &&
+          incoming().usadoPor == request.auth.uid &&
+          incoming().usedDeviceId is string &&
+          incoming().usedDeviceId.size() > 0 &&
+          incoming().usedDeviceId.size() <= 128 &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'usado', 'usadoPor', 'usadoPorTelefone', 'usadoEm', 'usedDeviceId'
+          ]) &&
+          (
+            !exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('deviceId', null) == null ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('deviceId', null) == incoming().usedDeviceId
+          )
+        )
+      );
+      allow delete: if isValidId(pinId) && isAdmin();
+    }
+
+    // Controlo anti-força bruta: utilizador não pode apagar ou reduzir o bloqueio
+    match /pinAttempts/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isOwner(userId) &&
+        incoming().count == 1 &&
+        incoming().windowStartMs is number &&
+        incoming().blockedUntilMs is number;
+      allow update: if isValidId(userId) && (
+        isAdmin() ||
+        (
+          isOwner(userId) &&
+          incoming().count is number &&
+          incoming().count >= 1 &&
+          (
+            incoming().blockedUntilMs >= existing().get('blockedUntilMs', 0) ||
+            existing().get('blockedUntilMs', 0) < request.time.toMillis()
+          )
+        )
+      );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // Catálogo público de metadados (sem links de stream)
+    match /videos/{videoId} {
+      allow get: if isValidId(videoId) && (existing().active == true || isAdmin());
+      allow list: if resource.data.active == true || isAdmin();
+      allow create: if isValidId(videoId) && isAdmin() && isValidVideo(incoming());
+      allow update: if isValidId(videoId) && (
+        (isAdmin() && isValidVideo(incoming())) ||
+        (
+          isNotBlocked() &&
+          existing().active == true &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['views']) &&
+          incoming().views is number &&
+          incoming().views == existing().views + 1
+        )
+      );
+      allow delete: if isValidId(videoId) && isAdmin();
+    }
+
+    // Cofre de Links de Streaming: só legível por Admin ou utilizador com pacote/título ativo no servidor
+    match /videoSources/{videoId} {
+      allow get: if isValidId(videoId) && (
+        isAdmin() ||
+        (isNotBlocked() &&
+         exists(/databases/$(database)/documents/videos/$(videoId)) &&
+         get(/databases/$(database)/documents/videos/$(videoId)).data.active == true && (
+           get(/databases/$(database)/documents/videos/$(videoId)).data.isFreeTrailer == true ||
+           hasActivePackageInDb(videoId)
+         ))
+      );
+      allow list: if isAdmin();
+      allow create, update: if isValidId(videoId) && isAdmin() &&
+        incoming().videoId == videoId &&
+        incoming().videoUrl is string && incoming().videoUrl.size() > 0 && incoming().videoUrl.size() <= 1000;
+      allow delete: if isValidId(videoId) && isAdmin();
+    }
+
+    // Pagamentos manuais: estritamente admin, imutável
+    match /manualPayments/{paymentId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(paymentId) && isAdmin() &&
+        incoming().telefone is string && incoming().telefone.size() <= 32 &&
+        incoming().transacaoId is string && incoming().transacaoId.size() <= 120 &&
+        incoming().valorMt is number && incoming().valorMt >= 0;
+    }
+
+    // Logs administrativos: estritamente admin, imutável
+    match /adminLogs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(logId) && isAdmin() &&
+        incoming().adminUid == request.auth.uid &&
+        incoming().action is string && incoming().action.size() <= 120 &&
+        incoming().details is string && incoming().details.size() <= 1000;
+    }
+
+    // Alertas de Segurança
+    match /securityAlerts/{alertId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(alertId) && isSignedIn() &&
+        incoming().userId == request.auth.uid &&
+        incoming().type in ['DEVICE_LOCK', 'BLOCKED_ACCESS', 'PIN_BRUTE_FORCE'] &&
+        incoming().details is string && incoming().details.size() <= 500;
+    }
+
+    // Definições Globais
+    match /appSettings/{settingId} {
+      allow get, list: if true;
+      allow create, update: if isValidId(settingId) && isAdmin() &&
+        incoming().appName is string && incoming().appName.size() <= 64 &&
+        incoming().primaryColor is string && incoming().primaryColor.size() <= 16 &&
+        incoming().supportWhatsapp is string && incoming().supportWhatsapp.size() <= 32 &&
+        incoming().downloadsEnabled is bool;
+    }
+
+    // Sessões de visualização em tempo real
+    match /watchSessions/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isValidId(userId) && isOwner(userId) && isNotBlocked() &&
+        incoming().userId == request.auth.uid &&
+        incoming().videoId is string && incoming().videoId.size() <= 128 &&
+        incoming().videoTitle is string && incoming().videoTitle.size() <= 140 &&
+        incoming().isActive is bool;
+      allow delete: if isValidId(userId) && (isOwner(userId) || isAdmin());
+    }
+  }
+}
