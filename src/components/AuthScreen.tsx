@@ -5,10 +5,6 @@ import { buildWhatsAppUrl } from '../utils/formatters';
 
 import { sanitizeUserError } from '../utils/errorSanitizer';
 
-interface AuthScreenProps {
-  onNavigateAdmin: () => void;
-}
-
 function mapSafeAuthError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes('auth/invalid-credential') || msg.includes('auth/wrong-password')) {
@@ -32,7 +28,7 @@ function mapSafeAuthError(err: unknown): string {
   return sanitizeUserError(err, 'Não foi possível iniciar sessão agora. Tenta novamente.');
 }
 
-export function AuthScreen({ onNavigateAdmin }: AuthScreenProps) {
+export function AuthScreen() {
   const {
     settings,
     authError,
@@ -100,13 +96,6 @@ export function AuthScreen({ onNavigateAdmin }: AuthScreenProps) {
         >
           {settings.appName}
         </span>
-        <button
-          type="button"
-          onClick={onNavigateAdmin}
-          className="text-xs font-medium text-zinc-400 hover:text-white transition-colors whitespace-nowrap cursor-pointer"
-        >
-          Admin
-        </button>
       </header>
 
       <main className="relative z-10 flex-1 flex items-center justify-center px-4 py-6">

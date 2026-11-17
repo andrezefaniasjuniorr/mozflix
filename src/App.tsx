@@ -269,7 +269,7 @@ function UserApp({ onNavigateAdmin }: { onNavigateAdmin: () => void }) {
     return (
       <>
         <OfflineIndicator />
-        <AuthScreen onNavigateAdmin={onNavigateAdmin} />
+        <AuthScreen />
         <PWAInstallBanner />
         <WhatsAppFloatingButton />
       </>
