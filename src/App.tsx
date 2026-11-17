@@ -13,6 +13,7 @@ import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { WhatsAppFloatingButton } from './components/WhatsAppFloatingButton';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { SplashLoader } from './components/SplashLoader';
 import { AdminLoginScreen } from './components/admin/AdminLoginScreen';
 import { AdminLayout, AdminTab } from './components/admin/AdminLayout';
 import { AdminDashboard } from './components/admin/AdminDashboard';
@@ -158,11 +159,7 @@ function AdminPortal({ onBackToUserApp }: { onBackToUserApp: () => void }) {
   }, [isVerifiedAdmin]);
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-[#0A0A0C] flex items-center justify-center text-xs text-zinc-400">
-        A carregar...
-      </div>
-    );
+    return <SplashLoader />;
   }
 
   if (!isVerifiedAdmin) {
@@ -265,11 +262,7 @@ function UserApp({ onNavigateAdmin }: { onNavigateAdmin: () => void }) {
   }, [firebaseUser, profile?.isAdmin]);
 
   if (loading) {
-    return (
-      <div className="min-h-screen bg-[#0A0A0C] flex items-center justify-center text-xs text-zinc-400">
-        A carregar...
-      </div>
-    );
+    return <SplashLoader />;
   }
 
   if (!firebaseUser || !profile) {
@@ -358,9 +351,25 @@ function UserApp({ onNavigateAdmin }: { onNavigateAdmin: () => void }) {
 }
 
 function MozFlixRouter() {
+  const { loading } = useAuth();
+  const [minIntroDone, setMinIntroDone] = useState(false);
+  const [splashRemoved, setSplashRemoved] = useState(false);
   const [isAdminRoute, setIsAdminRoute] = useState(
     () => typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')
   );
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setMinIntroDone(true), 1150);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  const splashFading = minIntroDone && !loading;
+
+  useEffect(() => {
+    if (!splashFading) return;
+    const t = window.setTimeout(() => setSplashRemoved(true), 320);
+    return () => window.clearTimeout(t);
+  }, [splashFading]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -377,11 +386,16 @@ function MozFlixRouter() {
     setIsAdminRoute(path.startsWith('/admin'));
   };
 
-  if (isAdminRoute) {
-    return <AdminPortal onBackToUserApp={() => navigateTo('/')} />;
-  }
-
-  return <UserApp onNavigateAdmin={() => navigateTo('/admin')} />;
+  return (
+    <>
+      {!splashRemoved && <SplashLoader fadingOut={splashFading} />}
+      {isAdminRoute ? (
+        <AdminPortal onBackToUserApp={() => navigateTo('/')} />
+      ) : (
+        <UserApp onNavigateAdmin={() => navigateTo('/admin')} />
+      )}
+    </>
+  );
 }
 
 export default function App() {

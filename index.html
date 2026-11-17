@@ -36,9 +36,29 @@
       href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
+    <style>
+      @keyframes pre-moz-pulse {
+        0%, 100% { transform: scale(0.97); filter: drop-shadow(0 0 14px rgba(229, 9, 20, 0.4)); }
+        50% { transform: scale(1.05); filter: drop-shadow(0 0 28px rgba(229, 9, 20, 0.8)); }
+      }
+      @keyframes pre-moz-bar {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(260%); }
+      }
+    </style>
   </head>
   <body class="bg-[#0A0A0C] text-[#F5F5F7] antialiased selection:bg-[#E50914] selection:text-white">
-    <div id="root"></div>
+    <div id="root">
+      <div style="min-height:100vh;background:#0A0A0C;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="110 104 292 304" width="88" height="88" fill="none" style="animation:pre-moz-pulse 1.9s ease-in-out infinite;">
+          <path d="M126 392V120H188L256 248L324 120H386V392H324V222L272 320H240L188 222V392H126Z" fill="#E50914"/>
+          <path d="M126 392L188 120L256 248L188 222V392H126Z" fill="#99040C" opacity="0.72"/>
+        </svg>
+        <div style="width:128px;height:3px;border-radius:999px;background:rgba(255,255,255,0.1);overflow:hidden;">
+          <div style="height:100%;width:56px;border-radius:999px;background:linear-gradient(90deg,rgba(229,9,20,0.1),#E50914,#FFFFFF);animation:pre-moz-bar 1.35s ease-in-out infinite;"></div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
