@@ -31,6 +31,8 @@ import { SeriesEpisodeSource, VideoItem, VideoSource } from '../types/mozflix';
 import {
   encodeStreamProxyUrl,
   isStreamTunnelAvailable,
+  probeTunnelStreamMode,
+  ResolvedStreamMode,
   resolveStreamTarget,
 } from '../utils/streamResolver';
 import { reportBackgroundError } from '../utils/errorSanitizer';
@@ -69,7 +71,14 @@ export function VideoPlayerModal({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const fallbackAttemptRef = useRef(0);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  const midStreamRecoveryRef = useRef(0);
+  const hlsFallbackTriedRef = useRef(false);
+  const directFallbackTriedRef = useRef(false);
+  const pendingResumeTimeRef = useRef(0);
+  const recoveryTimerRef = useRef<number | null>(null);
 
   const [vaultSource, setVaultSource] = useState<LoadedVaultSource | null>(null);
   const [sourceReady, setSourceReady] = useState(false);
@@ -89,22 +98,26 @@ export function VideoPlayerModal({
   const [activeHlsLevel, setActiveHlsLevel] = useState<number>(-1);
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
   const [embedUrl, setEmbedUrl] = useState<string | null>(null);
-  const [tunnelReady, setTunnelReady] = useState<boolean | null>(null);
+  const [tunnelReady, setTunnelReady] = useState<boolean>(false);
+  const [probedModes, setProbedModes] = useState<Record<string, ResolvedStreamMode>>({});
 
   const canPlayCurrentVideo = Boolean(video && (offlineBlobUrl || canWatchVideo(video)));
   const videoId = video?.id || null;
+  const isChannel = video?.category === 'Canal';
+  const videoTitle = video?.title || '';
+  const videoCategory = video?.category || '';
 
   // Fechar imediatamente se bloqueado ou se o acesso expirar
   useEffect(() => {
-    if (!video) return;
+    if (!videoId) return;
     if (profile?.isBlocked || !canPlayCurrentVideo) {
-      onClose();
+      onCloseRef.current();
     }
-  }, [video, profile?.isBlocked, canPlayCurrentVideo, onClose]);
+  }, [videoId, profile?.isBlocked, canPlayCurrentVideo]);
 
-  // 1. Buscar o link secreto / episódios do título em segundo plano com timeout + fallback cache
+  // 1. Buscar o link secreto + túnel HTTP + sondagem de formato antes de ligar o leitor
   useEffect(() => {
-    if (!video) {
+    if (!videoId) {
       setVaultSource(null);
       setSourceReady(false);
       setActiveEpisodeId(null);
@@ -120,9 +133,10 @@ export function VideoPlayerModal({
     setDuration(0);
     setHlsLevels([]);
     setActiveHlsLevel(-1);
+    pendingResumeTimeRef.current = 0;
 
     if (offlineBlobUrl) {
-      setVaultSource({ videoId: video.id, defaultUrl: offlineBlobUrl, episodes: [] });
+      setVaultSource({ videoId, defaultUrl: offlineBlobUrl, episodes: [] });
       setActiveEpisodeId(null);
       setSourceReady(true);
       return;
@@ -134,13 +148,10 @@ export function VideoPlayerModal({
     setActiveEpisodeId(initialEpisodeId || null);
 
     const loadSecretSource = async () => {
-      const ref = doc(db, 'videoSources', video.id);
+      const ref = doc(db, 'videoSources', videoId);
       let srcData: VideoSource | null = null;
 
-      const tunnelPromise = isStreamTunnelAvailable().then((ok) => {
-        if (!cancelled) setTunnelReady(ok);
-        return ok;
-      });
+      const tunnelPromise = isStreamTunnelAvailable().catch(() => false);
 
       try {
         const snap = await getDocWithTimeout(ref, 4500);
@@ -159,8 +170,7 @@ export function VideoPlayerModal({
         }
       }
 
-      await tunnelPromise.catch(() => false);
-
+      const tunnelOk = await tunnelPromise;
       if (cancelled) return;
 
       const sortedEpisodes: SeriesEpisodeSource[] = Array.isArray(srcData?.episodes)
@@ -169,23 +179,32 @@ export function VideoPlayerModal({
           )
         : [];
 
-      const fallbackUrl = srcData?.videoUrl || video.videoUrl || '';
+      const chosenEp =
+        sortedEpisodes.length > 0
+          ? (initialEpisodeId && sortedEpisodes.find((e) => e.id === initialEpisodeId)) ||
+            sortedEpisodes[0]
+          : null;
 
+      const fallbackUrl = srcData?.videoUrl || video?.videoUrl || '';
+      const initialRaw = chosenEp?.videoUrl || fallbackUrl;
+      const initialResolved = initialRaw ? resolveStreamTarget(initialRaw) : null;
+
+      if (initialResolved?.ambiguousType && initialResolved.requiresTunnel && tunnelOk) {
+        const detected = await probeTunnelStreamMode(initialResolved.url);
+        if (detected && !cancelled) {
+          setProbedModes((prev) => ({ ...prev, [initialRaw]: detected }));
+        }
+      }
+
+      if (cancelled) return;
+
+      setTunnelReady(tunnelOk);
       setVaultSource({
-        videoId: video.id,
+        videoId,
         defaultUrl: fallbackUrl,
         episodes: sortedEpisodes,
       });
-
-      if (sortedEpisodes.length > 0) {
-        const chosen =
-          (initialEpisodeId && sortedEpisodes.find((e) => e.id === initialEpisodeId)) ||
-          sortedEpisodes[0];
-        setActiveEpisodeId(chosen?.id || null);
-      } else {
-        setActiveEpisodeId(null);
-      }
-
+      setActiveEpisodeId(chosenEp?.id || null);
       setSourceReady(true);
     };
 
@@ -219,6 +238,31 @@ export function VideoPlayerModal({
     [rawStreamUrl]
   );
 
+  // Sondagem automática caso o utilizador troque para outro episódio ambíguo
+  useEffect(() => {
+    if (!sourceReady || !rawStreamUrl || !resolvedStream) return;
+    if (!resolvedStream.ambiguousType || !resolvedStream.requiresTunnel || !tunnelReady) return;
+    if (probedModes[rawStreamUrl]) return;
+
+    let cancelled = false;
+    void probeTunnelStreamMode(resolvedStream.url).then((detected) => {
+      if (detected && !cancelled) {
+        setProbedModes((prev) => ({ ...prev, [rawStreamUrl]: detected }));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceReady, rawStreamUrl, resolvedStream, tunnelReady, probedModes]);
+
+  const effectiveMode: ResolvedStreamMode | null = useMemo(() => {
+    if (!resolvedStream) return null;
+    if (rawStreamUrl && probedModes[rawStreamUrl]) {
+      return probedModes[rawStreamUrl];
+    }
+    return resolvedStream.mode;
+  }, [resolvedStream, rawStreamUrl, probedModes]);
+
   const primaryPlaybackUrl = useMemo(() => {
     if (!resolvedStream) return '';
     if (resolvedStream.requiresTunnel && tunnelReady) {
@@ -238,52 +282,144 @@ export function VideoPlayerModal({
     }
   }, []);
 
-  const activateIframeFallback = useCallback(() => {
-    if (!resolvedStream || !resolvedStream.canIframeFallback) return false;
-    cleanupHls();
-    const el = videoRef.current;
-    if (el) {
+  const attemptVideoPlay = useCallback(async (el: HTMLVideoElement, isCancelled: () => boolean) => {
+    try {
+      await el.play();
+      if (!isCancelled()) {
+        setPlaying(true);
+        setBuffering(false);
+      }
+    } catch {
       try {
-        el.pause();
-        el.removeAttribute('src');
-        el.load();
+        el.muted = true;
+        if (!isCancelled()) {
+          setMuted(true);
+          setAutoMutedNotice(true);
+        }
+        await el.play();
+        if (!isCancelled()) {
+          setPlaying(true);
+          setBuffering(false);
+        }
       } catch {
-        // ignore
+        if (!isCancelled()) {
+          setPlaying(false);
+          setBuffering(false);
+        }
       }
     }
-    setEmbedUrl(primaryPlaybackUrl || resolvedStream.url);
-    setPlaying(true);
-    window.setTimeout(() => setBuffering(false), 1200);
-    return true;
-  }, [resolvedStream, primaryPlaybackUrl, cleanupHls]);
+  }, []);
 
-  // 2. Ligar o stream ao leitor com resolução automática (vídeo direto -> HLS -> leitor incorporado)
+  const createResilientHls = useCallback(
+    (el: HTMLVideoElement, targetUrl: string, isCancelled: () => boolean) => {
+      cleanupHls();
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: isChannel,
+        manifestLoadingMaxRetry: 4,
+        manifestLoadingRetryDelay: 800,
+        levelLoadingMaxRetry: 4,
+        levelLoadingRetryDelay: 800,
+        fragLoadingMaxRetry: 6,
+        fragLoadingRetryDelay: 800,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+      });
+      hlsRef.current = hls;
+
+      let networkRecoveries = 0;
+      let mediaRecoveries = 0;
+      let lastMediaRecoverMs = 0;
+
+      hls.loadSource(targetUrl);
+      hls.attachMedia(el);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, (_evt, data) => {
+        if (isCancelled()) return;
+        const mapped = data.levels
+          .map((lvl, idx) => ({
+            index: idx,
+            label: lvl.height ? `${lvl.height}p` : `Nível ${idx + 1}`,
+          }))
+          .reverse();
+        setHlsLevels(mapped);
+        void attemptVideoPlay(el, isCancelled);
+      });
+
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data.fatal || isCancelled()) return;
+        reportBackgroundError(data);
+
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 4) {
+          networkRecoveries += 1;
+          window.setTimeout(() => {
+            if (!isCancelled() && hlsRef.current === hls) {
+              hls.startLoad();
+            }
+          }, 700);
+          return;
+        }
+
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < 3) {
+          const now = Date.now();
+          if (now - lastMediaRecoverMs > 1500) {
+            mediaRecoveries += 1;
+            lastMediaRecoverMs = now;
+            hls.recoverMediaError();
+            return;
+          }
+        }
+
+        cleanupHls();
+        // Último recurso para Safari/iOS nativo caso suportem HLS direto
+        if (el.canPlayType('application/vnd.mpegurl') || el.canPlayType('application/x-mpegURL')) {
+          el.src = targetUrl;
+          void attemptVideoPlay(el, isCancelled);
+        } else {
+          setBuffering(false);
+          setPlaying(false);
+        }
+      });
+    },
+    [cleanupHls, isChannel, attemptVideoPlay]
+  );
+
+  // 2. Ligar o stream ao leitor numa única passagem estável
   useEffect(() => {
-    if (!video || !sourceReady) return;
+    if (!videoId || !sourceReady) return;
 
     let cancelled = false;
+    const isCancelled = () => cancelled;
     const el = videoRef.current;
-    fallbackAttemptRef.current = 0;
+
+    midStreamRecoveryRef.current = 0;
+    hlsFallbackTriedRef.current = false;
+    directFallbackTriedRef.current = false;
+    pendingResumeTimeRef.current = 0;
+    if (recoveryTimerRef.current) {
+      window.clearTimeout(recoveryTimerRef.current);
+      recoveryTimerRef.current = null;
+    }
 
     cleanupHls();
     setEmbedUrl(null);
     setHlsLevels([]);
     setActiveHlsLevel(-1);
-    setIsLiveStream(false);
+    setIsLiveStream(isChannel);
     setPlaying(false);
 
-    if (!resolvedStream || !primaryPlaybackUrl) {
+    if (!resolvedStream || !primaryPlaybackUrl || !effectiveMode) {
       setBuffering(false);
       return;
     }
 
-    if (resolvedStream.mode === 'embed') {
+    if (effectiveMode === 'embed') {
       setBuffering(true);
       setEmbedUrl(primaryPlaybackUrl);
       setPlaying(true);
       const t = window.setTimeout(() => {
         if (!cancelled) setBuffering(false);
-      }, 1400);
+      }, 1500);
       return () => {
         cancelled = true;
         window.clearTimeout(t);
@@ -296,133 +432,50 @@ export function VideoPlayerModal({
     setCurrentTime(0);
     setDuration(0);
 
-    // Watchdog: se um link de plataforma ficar preso sem carregar vídeo direto, tenta player incorporado
-    const watchdogId = window.setTimeout(() => {
-      if (cancelled) return;
-      if (el.readyState === 0 && resolvedStream.canIframeFallback && fallbackAttemptRef.current < 2) {
-        fallbackAttemptRef.current = 2;
-        activateIframeFallback();
-      } else {
+    // Timeout apenas para libertar o spinner e permitir clique manual sem destruir o vídeo
+    const spinnerTimeoutId = window.setTimeout(() => {
+      if (!cancelled) {
         setBuffering(false);
       }
-    }, 4500);
+    }, 6500);
 
-    const attemptPlay = async () => {
-      try {
-        await el.play();
-        if (!cancelled) {
-          setPlaying(true);
-          setBuffering(false);
-        }
-      } catch {
-        try {
-          el.muted = true;
-          if (!cancelled) {
-            setMuted(true);
-            setAutoMutedNotice(true);
-          }
-          await el.play();
-          if (!cancelled) {
-            setPlaying(true);
-            setBuffering(false);
-          }
-        } catch {
-          if (!cancelled) {
-            setPlaying(false);
-            setBuffering(false);
-          }
-        }
-      }
-    };
-
-    const attachNativeVideo = (targetUrl: string) => {
-      el.src = targetUrl;
-      el.load();
-      void attemptPlay();
-    };
-
-    const attachHlsWithFallback = (targetUrl: string) => {
-      setIsLiveStream(video.category === 'Canal');
-
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: video.category === 'Canal',
-          manifestLoadingMaxRetry: 1,
-          levelLoadingMaxRetry: 1,
-          fragLoadingMaxRetry: 1,
-        });
-        hlsRef.current = hls;
-        let networkRetries = 0;
-        let mediaRetries = 0;
-
-        hls.loadSource(targetUrl);
-        hls.attachMedia(el);
-
-        hls.on(Hls.Events.MANIFEST_PARSED, (_evt, data) => {
-          if (cancelled) return;
-          const mapped = data.levels
-            .map((lvl, idx) => ({
-              index: idx,
-              label: lvl.height ? `${lvl.height}p` : `Nível ${idx + 1}`,
-            }))
-            .reverse();
-          setHlsLevels(mapped);
-          void attemptPlay();
-        });
-
-        hls.on(Hls.Events.ERROR, (_evt, data) => {
-          if (!data.fatal || cancelled) return;
-          reportBackgroundError(data);
-
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetries < 1) {
-            networkRetries += 1;
-            hls.startLoad();
-            return;
-          }
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries < 1) {
-            mediaRetries += 1;
-            hls.recoverMediaError();
-            return;
-          }
-
-          cleanupHls();
-          if (el.canPlayType('application/vnd.mpegurl') || el.canPlayType('application/x-mpegURL')) {
-            attachNativeVideo(targetUrl);
-          } else if (resolvedStream.canIframeFallback) {
-            activateIframeFallback();
-          } else {
-            attachNativeVideo(targetUrl);
-          }
-        });
-      } else {
-        attachNativeVideo(targetUrl);
-      }
-    };
-
-    if (resolvedStream.mode === 'hls') {
-      attachHlsWithFallback(primaryPlaybackUrl);
+    if (effectiveMode === 'hls' && Hls.isSupported()) {
+      createResilientHls(el, primaryPlaybackUrl, isCancelled);
     } else {
-      attachNativeVideo(primaryPlaybackUrl);
+      el.src = primaryPlaybackUrl;
+      void attemptVideoPlay(el, isCancelled);
     }
 
     return () => {
       cancelled = true;
-      window.clearTimeout(watchdogId);
+      window.clearTimeout(spinnerTimeoutId);
+      if (recoveryTimerRef.current) {
+        window.clearTimeout(recoveryTimerRef.current);
+        recoveryTimerRef.current = null;
+      }
       cleanupHls();
       el.pause();
       el.removeAttribute('src');
-      el.load();
     };
-  }, [video, sourceReady, resolvedStream, primaryPlaybackUrl, cleanupHls, activateIframeFallback]);
+  }, [
+    videoId,
+    sourceReady,
+    effectiveMode,
+    primaryPlaybackUrl,
+    resolvedStream,
+    isChannel,
+    cleanupHls,
+    createResilientHls,
+    attemptVideoPlay,
+  ]);
 
   // 3. Registar visualização + sessão em segundo plano
   useEffect(() => {
-    if (!video || !firebaseUser || !navigator.onLine) return;
+    if (!videoId || !firebaseUser || !navigator.onLine) return;
 
     const registerView = async () => {
       try {
-        await updateDoc(doc(db, 'videos', video.id), {
+        await updateDoc(doc(db, 'videos', videoId), {
           views: increment(1),
         });
       } catch {
@@ -433,8 +486,8 @@ export function VideoPlayerModal({
         await setDoc(doc(db, 'watchSessions', firebaseUser.uid), {
           userId: firebaseUser.uid,
           userPhone: profile?.phone || profile?.email || firebaseUser.uid,
-          videoId: video.id,
-          videoTitle: video.title,
+          videoId,
+          videoTitle,
           isActive: true,
           updatedAt: serverTimestamp(),
         });
@@ -450,8 +503,8 @@ export function VideoPlayerModal({
       setDoc(doc(db, 'watchSessions', firebaseUser.uid), {
         userId: firebaseUser.uid,
         userPhone: profile?.phone || profile?.email || firebaseUser.uid,
-        videoId: video.id,
-        videoTitle: video.title,
+        videoId,
+        videoTitle,
         isActive: true,
         updatedAt: serverTimestamp(),
       }).catch(() => undefined);
@@ -463,7 +516,7 @@ export function VideoPlayerModal({
         deleteDoc(doc(db, 'watchSessions', firebaseUser.uid)).catch(() => undefined);
       }
     };
-  }, [video, firebaseUser, profile?.phone, profile?.email]);
+  }, [videoId, videoTitle, firebaseUser, profile?.phone, profile?.email]);
 
   useEffect(() => {
     const onFsChange = () => {
@@ -534,20 +587,81 @@ export function VideoPlayerModal({
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
+  const handleVideoElementError = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    reportBackgroundError(e);
+    const el = videoRef.current;
+    if (!el || !resolvedStream || !primaryPlaybackUrl) {
+      setBuffering(false);
+      return;
+    }
+
+    // Caso 1: o vídeo já estava a tocar (abriu e caiu a meio) -> retomar do ponto exato sem tela preta
+    if (el.currentTime > 0.5 && midStreamRecoveryRef.current < 3) {
+      midStreamRecoveryRef.current += 1;
+      const resumeAt = el.currentTime;
+      pendingResumeTimeRef.current = resumeAt;
+      setBuffering(true);
+      const targetSrc = el.getAttribute('src') || primaryPlaybackUrl;
+      recoveryTimerRef.current = window.setTimeout(() => {
+        const node = videoRef.current;
+        if (!node) return;
+        if (effectiveMode === 'hls' && Hls.isSupported()) {
+          createResilientHls(node, targetSrc, () => !videoRef.current);
+        } else {
+          node.src = targetSrc;
+          void attemptVideoPlay(node, () => !videoRef.current);
+        }
+      }, 750);
+      return;
+    }
+
+    // Caso 2: erro logo ao abrir num link sem extensão -> tentar HLS primeiro
+    if (
+      !hlsFallbackTriedRef.current &&
+      effectiveMode === 'video' &&
+      !hlsRef.current &&
+      Hls.isSupported()
+    ) {
+      hlsFallbackTriedRef.current = true;
+      setBuffering(true);
+      createResilientHls(el, primaryPlaybackUrl, () => !videoRef.current);
+      return;
+    }
+
+    // Caso 3: se o túnel falhou ao iniciar, tentar ligação direta http://
+    if (
+      !directFallbackTriedRef.current &&
+      primaryPlaybackUrl !== resolvedStream.url
+    ) {
+      directFallbackTriedRef.current = true;
+      setBuffering(true);
+      if (effectiveMode === 'hls' && Hls.isSupported()) {
+        createResilientHls(el, resolvedStream.url, () => !videoRef.current);
+      } else {
+        el.src = resolvedStream.url;
+        void attemptVideoPlay(el, () => !videoRef.current);
+      }
+      return;
+    }
+
+    setBuffering(false);
+    setPlaying(false);
+  };
+
   return (
     <div
       ref={containerRef}
       className="fixed inset-0 z-50 bg-black flex flex-col justify-between"
       role="dialog"
       aria-modal="true"
-      aria-label={video.title}
+      aria-label={videoTitle}
     >
       {/* Barra superior — título e episódio, zero links e zero mensagens técnicas */}
       <div className="relative z-20 flex items-center justify-between px-4 py-3 bg-gradient-to-b from-black/85 to-transparent">
         <div className="min-w-0 flex items-center gap-2.5">
           <div className="min-w-0">
             <h2 className="font-display text-lg sm:text-xl font-bold text-white truncate">
-              {video.title}
+              {videoTitle}
               {currentEpisode && (
                 <span className="ml-2 text-sm font-medium text-zinc-300">
                   · T{currentEpisode.season} E{currentEpisode.episodeNumber}: {currentEpisode.title}
@@ -561,7 +675,7 @@ export function VideoPlayerModal({
                   AO VIVO
                 </span>
               )}
-              <span>{offlineBlobUrl ? 'Offline' : `${video.category} · ${quality}`}</span>
+              <span>{offlineBlobUrl ? 'Offline' : `${videoCategory} · ${quality}`}</span>
             </p>
           </div>
         </div>
@@ -581,7 +695,7 @@ export function VideoPlayerModal({
           <iframe
             key={embedUrl}
             src={embedUrl}
-            title={video.title}
+            title={videoTitle}
             referrerPolicy="no-referrer"
             allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
             allowFullScreen
@@ -592,6 +706,7 @@ export function VideoPlayerModal({
           <>
             <video
               ref={videoRef}
+              poster={video.coverUrl || undefined}
               controls={false}
               playsInline
               preload="auto"
@@ -602,7 +717,14 @@ export function VideoPlayerModal({
                 }
               }}
               onLoadedMetadata={() => {
-                setDuration(videoRef.current?.duration || 0);
+                const node = videoRef.current;
+                if (!node) return;
+                setDuration(node.duration || 0);
+                if (pendingResumeTimeRef.current > 0 && Number.isFinite(node.duration)) {
+                  const target = Math.min(pendingResumeTimeRef.current, Math.max(0, node.duration - 1));
+                  pendingResumeTimeRef.current = 0;
+                  if (target > 0) node.currentTime = target;
+                }
                 setBuffering(false);
               }}
               onLoadedData={() => setBuffering(false)}
@@ -617,71 +739,7 @@ export function VideoPlayerModal({
                 setBuffering(false);
               }}
               onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
-              onError={(e) => {
-                reportBackgroundError(e);
-                const el = videoRef.current;
-
-                // Passo 1: tentar HLS se ainda não tentou (usando o túnel HTTP se ativo)
-                if (
-                  fallbackAttemptRef.current === 0 &&
-                  el &&
-                  resolvedStream &&
-                  primaryPlaybackUrl &&
-                  resolvedStream.mode === 'video' &&
-                  !hlsRef.current &&
-                  Hls.isSupported()
-                ) {
-                  fallbackAttemptRef.current = 1;
-                  try {
-                    const hls = new Hls({
-                      enableWorker: true,
-                      manifestLoadingMaxRetry: 0,
-                    });
-                    hlsRef.current = hls;
-                    hls.loadSource(primaryPlaybackUrl);
-                    hls.attachMedia(el);
-                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                      void el.play().catch(() => setBuffering(false));
-                    });
-                    hls.on(Hls.Events.ERROR, (_ev, data) => {
-                      if (data.fatal) {
-                        reportBackgroundError(data);
-                        cleanupHls();
-                        if (!activateIframeFallback()) {
-                          setBuffering(false);
-                        }
-                      }
-                    });
-                    return;
-                  } catch (hlsErr) {
-                    reportBackgroundError(hlsErr);
-                  }
-                }
-
-                // Passo 2: se usou túnel e falhou, tenta diretamente http:// antes do iframe
-                if (
-                  fallbackAttemptRef.current < 2 &&
-                  el &&
-                  resolvedStream &&
-                  primaryPlaybackUrl !== resolvedStream.url
-                ) {
-                  fallbackAttemptRef.current = 2;
-                  el.src = resolvedStream.url;
-                  el.load();
-                  void el.play().catch(() => setBuffering(false));
-                  return;
-                }
-
-                // Passo 3: abre no player incorporado em segundo plano se aplicável
-                if (fallbackAttemptRef.current < 3) {
-                  fallbackAttemptRef.current = 3;
-                  if (activateIframeFallback()) {
-                    return;
-                  }
-                }
-
-                setBuffering(false);
-              }}
+              onError={handleVideoElementError}
               className="w-full h-full max-h-[82vh] object-contain cursor-pointer"
             />
 

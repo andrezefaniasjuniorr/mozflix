@@ -78,14 +78,16 @@ function rewriteM3u8(playlistText, finalUrl) {
 }
 
 function injectHtmlHttpGuard(html, finalUrl) {
-  const originHttp = forceHttp(new URL(finalUrl).origin);
+  const baseHttp = forceHttp(finalUrl);
+  const originHttp = forceHttp(new URL(baseHttp).origin);
+
   const guardScript = `<script>(function(){
-    var BASE = ${JSON.stringify(forceHttp(finalUrl))};
+    var BASE = ${JSON.stringify(baseHttp)};
     var ORIGIN_HTTP = ${JSON.stringify(originHttp)};
     function stripS(u){
       if(!u || typeof u !== 'string') return u;
       var s = u.trim();
-      if(!s || s.indexOf('blob:')===0 || s.indexOf('data:')===0 || s.indexOf('/api/stream')===0) return s;
+      if(!s || s.indexOf('blob:')===0 || s.indexOf('data:')===0 || s.indexOf('/api/stream')===0 || s.indexOf('javascript:')===0 || s.indexOf('#')===0) return s;
       if(s.indexOf('//')===0) s = 'http:' + s;
       if(s.indexOf('/')===0) s = ORIGIN_HTTP + s;
       else if(!/^[a-zA-Z][a-zA-Z0-9+\\-.]*:/.test(s)){
@@ -109,11 +111,12 @@ function injectHtmlHttpGuard(html, finalUrl) {
     if(origFetch){
       window.fetch = function(input, init){
         try{
-          if(typeof input === 'string' && /^https?:\\/\\//i.test(stripS(input))){
-            return origFetch.call(this, enc(input), init);
-          }
-          if(input && input.url && /^https?:\\/\\//i.test(stripS(input.url))){
-            return origFetch.call(this, new Request(enc(input.url), input), init);
+          if(typeof input === 'string'){
+            var s = stripS(input);
+            if(s && s.indexOf('http://')===0) return origFetch.call(this, enc(s), init);
+          } else if(input && input.url){
+            var su = stripS(input.url);
+            if(su && su.indexOf('http://')===0) return origFetch.call(this, new Request(enc(su), input), init);
           }
         }catch(e){}
         return origFetch.apply(this, arguments);
@@ -122,10 +125,13 @@ function injectHtmlHttpGuard(html, finalUrl) {
     var origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url){
       try{
-        if(typeof url === 'string' && /^https?:\\/\\//i.test(stripS(url))){
-          var args = Array.prototype.slice.call(arguments);
-          args[1] = enc(url);
-          return origOpen.apply(this, args);
+        if(typeof url === 'string'){
+          var s = stripS(url);
+          if(s && s.indexOf('http://')===0){
+            var args = Array.prototype.slice.call(arguments);
+            args[1] = enc(s);
+            return origOpen.apply(this, args);
+          }
         }
       }catch(e){}
       return origOpen.apply(this, arguments);
@@ -135,20 +141,46 @@ function injectHtmlHttpGuard(html, finalUrl) {
       Object.defineProperty(HTMLMediaElement.prototype, 'src', {
         get: mediaDesc.get,
         set: function(val){
-          return mediaDesc.set.call(this, typeof val === 'string' && /^https?:\\/\\//i.test(stripS(val)) ? enc(val) : val);
+          if(typeof val === 'string'){
+            var s = stripS(val);
+            if(s && s.indexOf('http://')===0) return mediaDesc.set.call(this, enc(s));
+          }
+          return mediaDesc.set.call(this, val);
         },
         configurable: true
       });
     }
+    var origSetAttr = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, val){
+      try{
+        if(typeof name === 'string' && name.toLowerCase() === 'src' && typeof val === 'string'){
+          var s = stripS(val);
+          if(s && s.indexOf('http://')===0){
+            return origSetAttr.call(this, name, enc(s));
+          }
+        }
+      }catch(e){}
+      return origSetAttr.apply(this, arguments);
+    };
   })();</script>`;
 
   const rewrittenAttrs = html.replace(
-    /\b(src|href|poster)=["'](https:\/\/[^"']+)["']/gi,
-    (_m, attr, urlVal) => {
-      if (/\.(css|js|png|jpg|jpeg|webp|svg|woff2?)(\?|$)/i.test(urlVal)) {
-        return `${attr}="${toProxyPath(urlVal)}"`;
+    /\b(src|href|poster)=(["'])([^"']+)\2/gi,
+    (full, attr, q, rawVal) => {
+      const val = String(rawVal || '').trim();
+      if (
+        !val ||
+        val.startsWith('#') ||
+        val.startsWith('data:') ||
+        val.startsWith('blob:') ||
+        val.startsWith('javascript:') ||
+        val.startsWith('/api/stream')
+      ) {
+        return full;
       }
-      return `${attr}="${forceHttp(urlVal)}"`;
+      const absHttp = resolveHttpRelative(val, baseHttp);
+      if (!absHttp.startsWith('http://')) return full;
+      return `${attr}=${q}${toProxyPath(absHttp)}${q}`;
     }
   );
 
@@ -158,7 +190,7 @@ function injectHtmlHttpGuard(html, finalUrl) {
   return `${guardScript}${rewrittenAttrs}`;
 }
 
-async function fetchHttpFollowingStrippedRedirects(initialUrl, reqHeaders) {
+async function fetchHttpFollowingStrippedRedirects(initialUrl, reqHeaders, extraHeaders = {}) {
   let currentUrl = forceHttp(initialUrl);
   const visited = new Set();
 
@@ -178,6 +210,9 @@ async function fetchHttpFollowingStrippedRedirects(initialUrl, reqHeaders) {
       'User-Agent',
       'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
     );
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      headers.set(k, v);
+    }
 
     const upstream = await fetch(currentUrl, {
       method: 'GET',
@@ -196,6 +231,59 @@ async function fetchHttpFollowingStrippedRedirects(initialUrl, reqHeaders) {
   }
 
   throw new Error('Too many redirects');
+}
+
+async function handleMetaProbe(targetHttpUrl, reqHeaders) {
+  const probeHeaders = new Headers(reqHeaders);
+  probeHeaders.set('Range', 'bytes=0-1023');
+
+  const { upstream, finalUrl } = await fetchHttpFollowingStrippedRedirects(
+    targetHttpUrl,
+    probeHeaders,
+    { 'Accept-Encoding': 'identity' }
+  );
+
+  const ct = (upstream.headers.get('Content-Type') || '').toLowerCase();
+  let kind = 'video';
+
+  if (ct.includes('mpegurl') || ct.includes('m3u8') || finalUrl.toLowerCase().includes('.m3u8')) {
+    kind = 'hls';
+  } else if (ct.includes('text/html') || ct.includes('application/xhtml')) {
+    kind = 'embed';
+  } else if (!ct.startsWith('video/') && !ct.startsWith('audio/')) {
+    try {
+      const reader = upstream.body?.getReader();
+      if (reader) {
+        const { value } = await reader.read();
+        await reader.cancel().catch(() => undefined);
+        if (value) {
+          const sample = new TextDecoder().decode(value).trimStart();
+          if (sample.startsWith('#EXTM3U')) {
+            kind = 'hls';
+          } else if (sample.startsWith('<!DOCTYPE') || sample.startsWith('<html') || sample.startsWith('<HTML')) {
+            kind = 'embed';
+          }
+        }
+      }
+    } catch {
+      // keep 'video'
+    }
+  } else {
+    try {
+      await upstream.body?.cancel();
+    } catch {
+      // ignore
+    }
+  }
+
+  return new Response(JSON.stringify({ ok: true, kind }), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-MozFlix-Stream': '1',
+    },
+  });
 }
 
 async function handleStreamRequest(request, url) {
@@ -242,6 +330,10 @@ async function handleStreamRequest(request, url) {
   }
 
   try {
+    if (url.searchParams.get('meta') === '1') {
+      return await handleMetaProbe(targetHttpUrl, request.headers);
+    }
+
     const { upstream, finalUrl } = await fetchHttpFollowingStrippedRedirects(
       targetHttpUrl,
       request.headers
@@ -267,7 +359,7 @@ async function handleStreamRequest(request, url) {
       });
     }
 
-    if (contentType.includes('text/html')) {
+    if (contentType.includes('text/html') || contentType.includes('application/xhtml')) {
       const html = await upstream.text();
       const injected = injectHtmlHttpGuard(html, finalUrl);
       return new Response(injected, {

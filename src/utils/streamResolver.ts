@@ -5,6 +5,7 @@ export interface ResolvedStream {
   mode: ResolvedStreamMode;
   canIframeFallback: boolean;
   requiresTunnel: boolean;
+  ambiguousType?: boolean;
 }
 
 const STRICT_HTTPS_HOSTS = [
@@ -89,32 +90,67 @@ export function encodeStreamProxyUrl(targetUrl: string): string {
   }
 }
 
-let cachedTunnelCheck: Promise<boolean> | null = null;
+let tunnelConfirmed = false;
+let inflightTunnelCheck: Promise<boolean> | null = null;
 
 /**
- * Verifica uma vez por sessão se o túnel Edge/Server /api/stream está ativo neste domínio.
+ * Verifica se o túnel Edge/Server /api/stream está ativo neste domínio.
+ * Só guarda em cache definitivo quando positivo, permitindo recuperar de falhas transitórias.
  */
 export function isStreamTunnelAvailable(): Promise<boolean> {
   if (typeof window === 'undefined') return Promise.resolve(false);
-  if (cachedTunnelCheck) return cachedTunnelCheck;
+  if (tunnelConfirmed) return Promise.resolve(true);
+  if (inflightTunnelCheck) return inflightTunnelCheck;
 
-  cachedTunnelCheck = (async () => {
+  inflightTunnelCheck = (async () => {
     try {
       const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 1800);
+      const timer = window.setTimeout(() => controller.abort(), 2200);
       const res = await fetch('/api/stream?ping=1', {
         method: 'GET',
         cache: 'no-store',
         signal: controller.signal,
       });
       window.clearTimeout(timer);
-      return res.ok && res.headers.get('X-MozFlix-Stream') === '1';
+      const ok = res.ok && res.headers.get('X-MozFlix-Stream') === '1';
+      if (ok) tunnelConfirmed = true;
+      return ok;
     } catch {
       return false;
+    } finally {
+      inflightTunnelCheck = null;
     }
   })();
 
-  return cachedTunnelCheck;
+  return inflightTunnelCheck;
+}
+
+/**
+ * Sonda silenciosamente em segundo plano o tipo real (hls / video / embed)
+ * para links de plataforma sem extensão explícita (.mp4 / .m3u8).
+ */
+export async function probeTunnelStreamMode(
+  targetHttpUrl: string
+): Promise<ResolvedStreamMode | null> {
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 3000);
+    const proxyBase = encodeStreamProxyUrl(targetHttpUrl);
+    const res = await fetch(`${proxyBase}&meta=1`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    window.clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { kind?: ResolvedStreamMode };
+    if (data?.kind === 'hls' || data?.kind === 'video' || data?.kind === 'embed') {
+      return data.kind;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function extractGoogleDriveId(url: URL): string | null {
@@ -351,7 +387,7 @@ export function resolveStreamTarget(rawUrl: string): ResolvedStream | null {
       }
     }
 
-    // Streamtape (mantém protocolo http://)
+    // Streamtape
     if (host.includes('streamtape.')) {
       const updatedPath = parsed.pathname.replace(/^\/v\//, '/e/');
       return {
@@ -362,7 +398,7 @@ export function resolveStreamTarget(rawUrl: string): ResolvedStream | null {
       };
     }
 
-    // DoodStream / clones (mantém protocolo http://)
+    // DoodStream / clones
     if (
       host.includes('dood') ||
       host.includes('d000d') ||
@@ -472,15 +508,17 @@ export function resolveStreamTarget(rawUrl: string): ResolvedStream | null {
         mode: 'embed',
         canIframeFallback: true,
         requiresTunnel,
+        ambiguousType: true,
       };
     }
 
-    // URL desconhecido sem extensão: tenta vídeo direto e permite fallback para player incorporado
+    // URL desconhecido sem extensão: marca como ambíguo para sondagem em segundo plano
     return {
       url: normalized,
       mode: 'video',
       canIframeFallback: true,
       requiresTunnel,
+      ambiguousType: true,
     };
   } catch {
     if (normalized.toLowerCase().includes('.m3u8')) {
@@ -496,6 +534,7 @@ export function resolveStreamTarget(rawUrl: string): ResolvedStream | null {
       mode: 'video',
       canIframeFallback: !hasDirectBinaryVideoExtension(normalized),
       requiresTunnel: normalized.startsWith('http://'),
+      ambiguousType: !hasDirectBinaryVideoExtension(normalized),
     };
   }
 }
