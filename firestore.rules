@@ -67,10 +67,8 @@ service cloud.firestore {
     }
 
     // Validação estrita no servidor (request.time) para impedir burlas de relógio e partilha
-    function hasActivePackageInDb(videoId) {
-      let u = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
-      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        u.get('isBlocked', false) != true && (
+    function hasActiveUserPackage(u, videoId) {
+      return u.get('isBlocked', false) != true && (
           // 1. Pacote com acesso global a todo o catálogo
           (u.get('includeAllContent', false) == true &&
            u.get('packageExpiresAt', null) != null &&
@@ -80,7 +78,8 @@ service cloud.firestore {
            u.get('activePackageExpiresAt', null) != null &&
            u.activePackageExpiresAt > request.time &&
            exists(/databases/$(database)/documents/packages/$(u.activePackageId)) &&
-           videoId in get(/databases/$(database)/documents/packages/$(u.activePackageId)).data.videoIds) ||
+           (get(/databases/$(database)/documents/packages/$(u.activePackageId)).data.get('includeAllContent', false) == true ||
+            videoId in get(/databases/$(database)/documents/packages/$(u.activePackageId)).data.videoIds)) ||
           // 3. Conteúdo desbloqueado por código PIN exclusivo (filme/série/canal ou lista do pacote)
           (exists(/databases/$(database)/documents/users/$(request.auth.uid)/unlockedVideos/$(videoId)) &&
            get(/databases/$(database)/documents/users/$(request.auth.uid)/unlockedVideos/$(videoId)).data.expiresAt > request.time) ||
@@ -89,7 +88,12 @@ service cloud.firestore {
            u.get('packageExpiresAt', null) != null &&
            u.packageExpiresAt > request.time &&
            (u.get('currentPackage', '') != 'Por Filme' || u.get('singleVideoId', null) == videoId))
-        );
+      );
+    }
+
+    function hasActivePackageInDb(videoId) {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        hasActiveUserPackage(get(/databases/$(database)/documents/users/$(request.auth.uid)).data, videoId);
     }
 
     function isValidUserCreate(data) {

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import {
   ListVideo,
@@ -19,6 +19,7 @@ import {
   doc,
   deleteDoc,
   getDoc,
+  getDocFromCache,
   increment,
   serverTimestamp,
   setDoc,
@@ -27,6 +28,8 @@ import {
 import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { SeriesEpisodeSource, VideoItem, VideoSource } from '../types/mozflix';
+import { resolveStreamTarget } from '../utils/streamResolver';
+import { reportBackgroundError } from '../utils/errorSanitizer';
 
 interface VideoPlayerModalProps {
   video: VideoItem | null;
@@ -36,6 +39,12 @@ interface VideoPlayerModalProps {
 }
 
 type QualityOption = 'Auto' | '1080p' | '720p' | '480p';
+
+interface LoadedVaultSource {
+  videoId: string;
+  defaultUrl: string;
+  episodes: SeriesEpisodeSource[];
+}
 
 export function VideoPlayerModal({
   video,
@@ -48,13 +57,15 @@ export function VideoPlayerModal({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
 
-  const [episodes, setEpisodes] = useState<SeriesEpisodeSource[]>([]);
+  const [vaultSource, setVaultSource] = useState<LoadedVaultSource | null>(null);
+  const [sourceReady, setSourceReady] = useState(false);
   const [activeEpisodeId, setActiveEpisodeId] = useState<string | null>(initialEpisodeId || null);
   const [episodeMenuOpen, setEpisodeMenuOpen] = useState(false);
 
-  const [playing, setPlaying] = useState(true);
+  const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(true);
   const [muted, setMuted] = useState(false);
+  const [autoMutedNotice, setAutoMutedNotice] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -63,16 +74,12 @@ export function VideoPlayerModal({
   const [hlsLevels, setHlsLevels] = useState<{ index: number; label: string }[]>([]);
   const [activeHlsLevel, setActiveHlsLevel] = useState<number>(-1);
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [embedUrl, setEmbedUrl] = useState<string | null>(null);
 
   const canPlayCurrentVideo = Boolean(video && (offlineBlobUrl || canWatchVideo(video)));
+  const videoId = video?.id || null;
 
-  useEffect(() => {
-    setActiveEpisodeId(initialEpisodeId || null);
-    setEpisodeMenuOpen(false);
-  }, [video?.id, initialEpisodeId]);
-
-  // Fechar imediatamente se bloqueado ou se o pacote expirar
+  // Fechar imediatamente se bloqueado ou se o acesso expirar
   useEffect(() => {
     if (!video) return;
     if (profile?.isBlocked || !canPlayCurrentVideo) {
@@ -80,91 +87,226 @@ export function VideoPlayerModal({
     }
   }, [video, profile?.isBlocked, canPlayCurrentVideo, onClose]);
 
-  // Buscar link e episódios no cofre videoSources em segundo plano — zero links visíveis na interface
+  // 1. Buscar o link secreto / episódios do título uma única vez por abertura (em segundo plano)
   useEffect(() => {
-    const el = videoRef.current;
-    if (!el || !video) return;
+    if (!video) {
+      setVaultSource(null);
+      setSourceReady(false);
+      setActiveEpisodeId(null);
+      setEmbedUrl(null);
+      return;
+    }
 
     let cancelled = false;
-    setPlaybackError(null);
-    setBuffering(true);
-    setIsLiveStream(false);
+    setEpisodeMenuOpen(false);
+    setQualityMenuOpen(false);
+    setAutoMutedNotice(false);
+    setCurrentTime(0);
+    setDuration(0);
     setHlsLevels([]);
     setActiveHlsLevel(-1);
 
-    const cleanupHls = () => {
-      if (hlsRef.current) {
+    if (offlineBlobUrl) {
+      setVaultSource({ videoId: video.id, defaultUrl: offlineBlobUrl, episodes: [] });
+      setActiveEpisodeId(null);
+      setSourceReady(true);
+      return;
+    }
+
+    setSourceReady(false);
+    setBuffering(true);
+    setVaultSource(null);
+    setActiveEpisodeId(initialEpisodeId || null);
+
+    const loadSecretSource = async () => {
+      const ref = doc(db, 'videoSources', video.id);
+      let srcData: VideoSource | null = null;
+
+      try {
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          srcData = snap.data() as VideoSource;
+        }
+      } catch (err) {
+        reportBackgroundError(err);
+        // Tenta ler da persistência local se a rede falhou
+        try {
+          const cached = await getDocFromCache(ref);
+          if (cached.exists()) {
+            srcData = cached.data() as VideoSource;
+          }
+        } catch {
+          // Segue para fallback em segundo plano
+        }
+      }
+
+      if (cancelled) return;
+
+      const sortedEpisodes: SeriesEpisodeSource[] = Array.isArray(srcData?.episodes)
+        ? [...srcData.episodes].sort(
+            (a, b) => a.season - b.season || a.episodeNumber - b.episodeNumber
+          )
+        : [];
+
+      const fallbackUrl = srcData?.videoUrl || video.videoUrl || '';
+
+      setVaultSource({
+        videoId: video.id,
+        defaultUrl: fallbackUrl,
+        episodes: sortedEpisodes,
+      });
+
+      if (sortedEpisodes.length > 0) {
+        const chosen =
+          (initialEpisodeId && sortedEpisodes.find((e) => e.id === initialEpisodeId)) ||
+          sortedEpisodes[0];
+        setActiveEpisodeId(chosen?.id || null);
+      } else {
+        setActiveEpisodeId(null);
+      }
+
+      setSourceReady(true);
+    };
+
+    void loadSecretSource();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [videoId, initialEpisodeId, offlineBlobUrl]);
+
+  const episodes = useMemo(() => vaultSource?.episodes || [], [vaultSource]);
+
+  const activeEpIdx = useMemo(
+    () => episodes.findIndex((e) => e.id === activeEpisodeId),
+    [episodes, activeEpisodeId]
+  );
+
+  const currentEpisode = activeEpIdx >= 0 ? episodes[activeEpIdx] : episodes[0] || null;
+  const nextEpisode =
+    activeEpIdx >= 0 && activeEpIdx + 1 < episodes.length ? episodes[activeEpIdx + 1] : null;
+
+  const rawStreamUrl = useMemo(() => {
+    if (offlineBlobUrl) return offlineBlobUrl;
+    if (!vaultSource) return '';
+    if (currentEpisode?.videoUrl) return currentEpisode.videoUrl;
+    return vaultSource.defaultUrl || '';
+  }, [offlineBlobUrl, vaultSource, currentEpisode]);
+
+  const resolvedStream = useMemo(
+    () => (rawStreamUrl ? resolveStreamTarget(rawStreamUrl) : null),
+    [rawStreamUrl]
+  );
+
+  const cleanupHls = useCallback(() => {
+    if (hlsRef.current) {
+      try {
         hlsRef.current.destroy();
-        hlsRef.current = null;
+      } catch {
+        // ignore
+      }
+      hlsRef.current = null;
+    }
+  }, []);
+
+  // 2. Ligar o stream ao elemento de vídeo ou leitor incorporado
+  useEffect(() => {
+    if (!video || !sourceReady) return;
+
+    let cancelled = false;
+    const el = videoRef.current;
+
+    cleanupHls();
+    setEmbedUrl(null);
+    setHlsLevels([]);
+    setActiveHlsLevel(-1);
+    setIsLiveStream(false);
+    setPlaying(false);
+
+    if (!resolvedStream) {
+      setBuffering(false);
+      return;
+    }
+
+    if (resolvedStream.mode === 'embed') {
+      setBuffering(true);
+      setEmbedUrl(resolvedStream.url);
+      setPlaying(true);
+      // Garante que o spinner desaparece mesmo que o iframe demore a disparar onLoad
+      const t = window.setTimeout(() => {
+        if (!cancelled) setBuffering(false);
+      }, 1800);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(t);
+      };
+    }
+
+    if (!el) return;
+
+    setBuffering(true);
+    setCurrentTime(0);
+    setDuration(0);
+
+    // Watchdog: nunca deixa o spinner preso indefinidamente
+    const watchdogId = window.setTimeout(() => {
+      if (!cancelled) {
+        setBuffering(false);
+      }
+    }, 5000);
+
+    const attemptPlay = async () => {
+      try {
+        await el.play();
+        if (!cancelled) {
+          setPlaying(true);
+          setBuffering(false);
+        }
+      } catch {
+        // Se o browser bloqueou autoplay com som após await, arranca em mudo para rodar já
+        try {
+          el.muted = true;
+          if (!cancelled) {
+            setMuted(true);
+            setAutoMutedNotice(true);
+          }
+          await el.play();
+          if (!cancelled) {
+            setPlaying(true);
+            setBuffering(false);
+          }
+        } catch {
+          // Mesmo em modos restritos (iOS Low Power), mostra o botão Play sem spinner infinito
+          if (!cancelled) {
+            setPlaying(false);
+            setBuffering(false);
+          }
+        }
       }
     };
 
-    const attachStream = async () => {
-      cleanupHls();
+    const attachNativeVideo = (targetUrl: string) => {
+      el.src = targetUrl;
+      el.load();
+      void attemptPlay();
+    };
 
-      let streamTarget = offlineBlobUrl || '';
-      let resolvedEpisodes: SeriesEpisodeSource[] = [];
+    const attachHlsWithFallback = (targetUrl: string) => {
+      setIsLiveStream(video.category === 'Canal');
 
-      if (!streamTarget) {
-        try {
-          const sourceSnap = await getDoc(doc(db, 'videoSources', video.id));
-          if (cancelled) return;
-          if (sourceSnap.exists()) {
-            const srcData = sourceSnap.data() as VideoSource;
-            resolvedEpisodes = Array.isArray(srcData.episodes)
-              ? [...srcData.episodes].sort(
-                  (a, b) => a.season - b.season || a.episodeNumber - b.episodeNumber
-                )
-              : [];
-            setEpisodes(resolvedEpisodes);
-
-            if (resolvedEpisodes.length > 0) {
-              const chosen =
-                (activeEpisodeId && resolvedEpisodes.find((e) => e.id === activeEpisodeId)) ||
-                resolvedEpisodes[0];
-              if (!activeEpisodeId && chosen) {
-                setActiveEpisodeId(chosen.id);
-              }
-              streamTarget = chosen?.videoUrl || srcData.videoUrl || '';
-            } else {
-              streamTarget = srcData.videoUrl || '';
-            }
-          } else {
-            setEpisodes([]);
-            streamTarget = video.videoUrl || '';
-          }
-        } catch {
-          if (!cancelled) {
-            setBuffering(false);
-            setPlaybackError('Pacote expirado ou acesso negado.');
-          }
-          return;
-        }
-      } else {
-        setEpisodes([]);
-      }
-
-      if (!streamTarget) {
-        if (!cancelled) {
-          setBuffering(false);
-          setPlaybackError('Stream indisponível.');
-        }
-        return;
-      }
-
-      const lower = streamTarget.toLowerCase();
-      const isHls = lower.includes('.m3u8');
-      if (isHls) {
-        setIsLiveStream(video.category === 'Canal');
-      }
-
-      if (isHls && Hls.isSupported()) {
+      if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: video.category === 'Canal',
+          manifestLoadingMaxRetry: 2,
+          levelLoadingMaxRetry: 2,
+          fragLoadingMaxRetry: 2,
         });
         hlsRef.current = hls;
-        hls.loadSource(streamTarget);
+        let networkRetries = 0;
+        let mediaRetries = 0;
+
+        hls.loadSource(targetUrl);
         hls.attachMedia(el);
 
         hls.on(Hls.Events.MANIFEST_PARSED, (_evt, data) => {
@@ -176,44 +318,54 @@ export function VideoPlayerModal({
             }))
             .reverse();
           setHlsLevels(mapped);
-          void el.play().catch(() => {
-            if (!cancelled) setPlaying(false);
-          });
+          void attemptPlay();
         });
 
         hls.on(Hls.Events.ERROR, (_evt, data) => {
           if (!data.fatal || cancelled) return;
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          reportBackgroundError(data);
+
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetries < 2) {
+            networkRetries += 1;
             hls.startLoad();
-          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries < 2) {
+            mediaRetries += 1;
             hls.recoverMediaError();
+            return;
+          }
+
+          // Fallback silencioso para reprodutor nativo (resolve bloqueios CORS em streams IPTV/Safari)
+          cleanupHls();
+          if (el.canPlayType('application/vnd.mpegurl') || el.canPlayType('application/x-mpegURL')) {
+            attachNativeVideo(targetUrl);
           } else {
-            setBuffering(false);
-            setPlaybackError('Canal ou stream offline de momento.');
-            cleanupHls();
+            attachNativeVideo(targetUrl);
           }
         });
       } else {
-        el.src = streamTarget;
-        el.load();
-        void el.play().catch(() => {
-          if (!cancelled) setPlaying(false);
-        });
+        attachNativeVideo(targetUrl);
       }
     };
 
-    void attachStream();
+    if (resolvedStream.mode === 'hls') {
+      attachHlsWithFallback(resolvedStream.url);
+    } else {
+      attachNativeVideo(resolvedStream.url);
+    }
 
     return () => {
       cancelled = true;
+      window.clearTimeout(watchdogId);
       cleanupHls();
       el.pause();
       el.removeAttribute('src');
       el.load();
     };
-  }, [video, activeEpisodeId, offlineBlobUrl]);
+  }, [video, sourceReady, resolvedStream, cleanupHls]);
 
-  // Registar visualização + sessão em tempo real
+  // 3. Registar visualização + sessão em tempo real em segundo plano
   useEffect(() => {
     if (!video || !firebaseUser || !navigator.onLine) return;
 
@@ -223,7 +375,7 @@ export function VideoPlayerModal({
           views: increment(1),
         });
       } catch {
-        // Ignorar erro transitório
+        // Ignorar em segundo plano
       }
 
       try {
@@ -236,7 +388,7 @@ export function VideoPlayerModal({
           updatedAt: serverTimestamp(),
         });
       } catch {
-        // Ignorar erro de sessão
+        // Ignorar em segundo plano
       }
     };
 
@@ -272,16 +424,11 @@ export function VideoPlayerModal({
 
   if (!video) return null;
 
-  const activeEpIdx = episodes.findIndex((e) => e.id === activeEpisodeId);
-  const currentEpisode = activeEpIdx >= 0 ? episodes[activeEpIdx] : episodes[0] || null;
-  const nextEpisode =
-    activeEpIdx >= 0 && activeEpIdx + 1 < episodes.length ? episodes[activeEpIdx + 1] : null;
-
   const togglePlay = () => {
     const el = videoRef.current;
-    if (!el) return;
+    if (!el || embedUrl) return;
     if (el.paused) {
-      void el.play();
+      void el.play().catch((err) => reportBackgroundError(err));
       setPlaying(true);
     } else {
       el.pause();
@@ -291,13 +438,13 @@ export function VideoPlayerModal({
 
   const skipSeconds = (delta: number) => {
     const el = videoRef.current;
-    if (!el || isLiveStream) return;
+    if (!el || isLiveStream || embedUrl) return;
     el.currentTime = Math.max(0, Math.min(el.duration || 0, el.currentTime + delta));
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const el = videoRef.current;
-    if (!el || isLiveStream) return;
+    if (!el || isLiveStream || embedUrl) return;
     const target = Number(e.target.value);
     el.currentTime = target;
     setCurrentTime(target);
@@ -305,9 +452,10 @@ export function VideoPlayerModal({
 
   const toggleMute = () => {
     const el = videoRef.current;
-    if (!el) return;
+    if (!el || embedUrl) return;
     el.muted = !el.muted;
     setMuted(el.muted);
+    if (!el.muted) setAutoMutedNotice(false);
   };
 
   const toggleFullscreen = async () => {
@@ -343,8 +491,8 @@ export function VideoPlayerModal({
       aria-modal="true"
       aria-label={video.title}
     >
-      {/* Top bar — título e episódio, zero links e sem marca d'água */}
-      <div className="relative z-10 flex items-center justify-between px-4 py-3 bg-gradient-to-b from-black/85 to-transparent">
+      {/* Barra superior — título e episódio, zero links e zero mensagens técnicas */}
+      <div className="relative z-20 flex items-center justify-between px-4 py-3 bg-gradient-to-b from-black/85 to-transparent">
         <div className="min-w-0 flex items-center gap-2.5">
           <div className="min-w-0">
             <h2 className="font-display text-lg sm:text-xl font-bold text-white truncate">
@@ -376,47 +524,118 @@ export function VideoPlayerModal({
         </button>
       </div>
 
-      {/* Superfície de vídeo livre para gravação de ecrã e reprodução fluida */}
-      <div className="relative flex-1 flex items-center justify-center overflow-hidden">
-        <video
-          ref={videoRef}
-          controls={false}
-          playsInline
-          onClick={togglePlay}
-          onWaiting={() => setBuffering(true)}
-          onCanPlay={() => setBuffering(false)}
-          onPlaying={() => {
-            setBuffering(false);
-            setPlaying(true);
-          }}
-          onPause={() => setPlaying(false)}
-          onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
-          onLoadedMetadata={() => setDuration(videoRef.current?.duration || 0)}
-          onError={() => {
-            setBuffering(false);
-            setPlaybackError('Stream indisponível. Contacta o suporte.');
-          }}
-          className="w-full h-full max-h-[82vh] object-contain cursor-pointer"
-        />
+      {/* Área de reprodução */}
+      <div className="relative flex-1 flex items-center justify-center overflow-hidden bg-black">
+        {embedUrl ? (
+          <iframe
+            key={embedUrl}
+            src={embedUrl}
+            title={video.title}
+            referrerPolicy="no-referrer"
+            allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+            allowFullScreen
+            onLoad={() => setBuffering(false)}
+            className="w-full h-full border-0"
+          />
+        ) : (
+          <>
+            <video
+              ref={videoRef}
+              controls={false}
+              playsInline
+              preload="auto"
+              onClick={togglePlay}
+              onWaiting={() => setBuffering(true)}
+              onLoadedMetadata={() => {
+                setDuration(videoRef.current?.duration || 0);
+                setBuffering(false);
+              }}
+              onLoadedData={() => setBuffering(false)}
+              onCanPlay={() => setBuffering(false)}
+              onCanPlayThrough={() => setBuffering(false)}
+              onPlaying={() => {
+                setBuffering(false);
+                setPlaying(true);
+              }}
+              onPause={() => {
+                setPlaying(false);
+                setBuffering(false);
+              }}
+              onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
+              onError={(e) => {
+                reportBackgroundError(e);
+                // Fallback silencioso em segundo plano se o stream direto for HLS sem extensão .m3u8
+                const el = videoRef.current;
+                if (
+                  el &&
+                  resolvedStream &&
+                  resolvedStream.mode === 'video' &&
+                  !hlsRef.current &&
+                  Hls.isSupported()
+                ) {
+                  try {
+                    const hls = new Hls({
+                      enableWorker: true,
+                      manifestLoadingMaxRetry: 1,
+                    });
+                    hlsRef.current = hls;
+                    hls.loadSource(resolvedStream.url);
+                    hls.attachMedia(el);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                      void el.play().catch(() => setBuffering(false));
+                    });
+                    hls.on(Hls.Events.ERROR, (_ev, data) => {
+                      if (data.fatal) {
+                        reportBackgroundError(data);
+                        setBuffering(false);
+                        cleanupHls();
+                      }
+                    });
+                    return;
+                  } catch (hlsErr) {
+                    reportBackgroundError(hlsErr);
+                  }
+                }
+                setBuffering(false);
+              }}
+              className="w-full h-full max-h-[82vh] object-contain cursor-pointer"
+            />
 
-        {buffering && !playbackError && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <Loader2 className="w-7 h-7 text-white animate-spin" />
-          </div>
+            {!playing && !buffering && sourceReady && (
+              <button
+                type="button"
+                onClick={togglePlay}
+                aria-label="Reproduzir"
+                className="absolute z-10 w-14 h-14 rounded-full flex items-center justify-center text-white shadow-2xl transition-transform hover:scale-105 cursor-pointer"
+                style={{ backgroundColor: settings.primaryColor }}
+              >
+                <Play className="w-6 h-6 fill-current ml-0.5" />
+              </button>
+            )}
+
+            {autoMutedNotice && muted && playing && (
+              <button
+                type="button"
+                onClick={toggleMute}
+                className="absolute top-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/80 border border-white/20 text-xs font-medium text-white hover:bg-black cursor-pointer"
+              >
+                <VolumeX className="w-3.5 h-3.5 text-red-400" />
+                Toque para ativar som
+              </button>
+            )}
+          </>
         )}
 
-        {playbackError && (
-          <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div className="bg-[#141418] border border-white/15 rounded-md px-4 py-3 text-xs text-red-300">
-              {playbackError}
-            </div>
+        {buffering && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+            <Loader2 className="w-7 h-7 text-white animate-spin" />
           </div>
         )}
       </div>
 
       {/* Controlos compactos */}
-      <div className="relative z-10 px-4 py-3 bg-gradient-to-t from-black/95 via-black/80 to-transparent space-y-2.5">
-        {!isLiveStream && (
+      <div className="relative z-20 px-4 py-3 bg-gradient-to-t from-black/95 via-black/80 to-transparent space-y-2.5">
+        {!isLiveStream && !embedUrl && (
           <div className="flex items-center gap-2.5">
             <span className="text-[11px] text-zinc-300 tabular-nums w-10">
               {formatTime(currentTime)}
@@ -437,41 +656,45 @@ export function VideoPlayerModal({
 
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 sm:gap-2">
-            <button
-              type="button"
-              onClick={togglePlay}
-              className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-xs font-semibold text-white cursor-pointer"
-              style={{ backgroundColor: settings.primaryColor }}
-            >
-              {playing ? (
-                <Pause className="w-3.5 h-3.5" />
-              ) : (
-                <Play className="w-3.5 h-3.5 fill-current" />
-              )}
-              <span className="hidden sm:inline">{playing ? 'Pausa' : 'Play'}</span>
-            </button>
-
-            {!isLiveStream && (
+            {!embedUrl && (
               <>
                 <button
                   type="button"
-                  onClick={() => skipSeconds(-10)}
-                  aria-label="-10s"
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white/10 hover:bg-white/20 text-[11px] font-medium text-white cursor-pointer"
+                  onClick={togglePlay}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-xs font-semibold text-white cursor-pointer"
+                  style={{ backgroundColor: settings.primaryColor }}
                 >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>10s</span>
+                  {playing ? (
+                    <Pause className="w-3.5 h-3.5" />
+                  ) : (
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                  )}
+                  <span className="hidden sm:inline">{playing ? 'Pausa' : 'Play'}</span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => skipSeconds(10)}
-                  aria-label="+10s"
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white/10 hover:bg-white/20 text-[11px] font-medium text-white cursor-pointer"
-                >
-                  <RotateCw className="w-3.5 h-3.5" />
-                  <span>10s</span>
-                </button>
+                {!isLiveStream && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => skipSeconds(-10)}
+                      aria-label="-10s"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white/10 hover:bg-white/20 text-[11px] font-medium text-white cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>10s</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => skipSeconds(10)}
+                      aria-label="+10s"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white/10 hover:bg-white/20 text-[11px] font-medium text-white cursor-pointer"
+                    >
+                      <RotateCw className="w-3.5 h-3.5" />
+                      <span>10s</span>
+                    </button>
+                  </>
+                )}
               </>
             )}
 
@@ -486,14 +709,16 @@ export function VideoPlayerModal({
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={toggleMute}
-              aria-label={muted ? 'Som' : 'Mudo'}
-              className="p-1.5 rounded bg-white/10 hover:bg-white/20 text-white cursor-pointer"
-            >
-              {muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-            </button>
+            {!embedUrl && (
+              <button
+                type="button"
+                onClick={toggleMute}
+                aria-label={muted ? 'Som' : 'Mudo'}
+                className="p-1.5 rounded bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+              >
+                {muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-1.5 relative">
@@ -536,77 +761,79 @@ export function VideoPlayerModal({
               </div>
             )}
 
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => {
-                  setQualityMenuOpen((prev) => !prev);
-                  setEpisodeMenuOpen(false);
-                }}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white/10 hover:bg-white/20 text-[11px] font-medium text-white cursor-pointer"
-              >
-                <Settings2 className="w-3.5 h-3.5" />
-                <span>{quality}</span>
-              </button>
-              {qualityMenuOpen && (
-                <div className="absolute right-0 bottom-9 w-28 bg-[#141418] border border-white/15 rounded shadow-xl p-1 z-30">
-                  {hlsLevels.length > 0 ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => handleSelectHlsLevel(-1, 'Auto')}
-                        className={`w-full text-left px-2.5 py-1 text-[11px] rounded transition-colors cursor-pointer ${
-                          activeHlsLevel === -1 ? 'text-white' : 'text-zinc-300 hover:bg-white/10'
-                        }`}
-                        style={
-                          activeHlsLevel === -1
-                            ? { backgroundColor: settings.primaryColor }
-                            : undefined
-                        }
-                      >
-                        Auto
-                      </button>
-                      {hlsLevels.map((lvl) => (
+            {!embedUrl && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQualityMenuOpen((prev) => !prev);
+                    setEpisodeMenuOpen(false);
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white/10 hover:bg-white/20 text-[11px] font-medium text-white cursor-pointer"
+                >
+                  <Settings2 className="w-3.5 h-3.5" />
+                  <span>{quality}</span>
+                </button>
+                {qualityMenuOpen && (
+                  <div className="absolute right-0 bottom-9 w-28 bg-[#141418] border border-white/15 rounded shadow-xl p-1 z-30">
+                    {hlsLevels.length > 0 ? (
+                      <>
                         <button
-                          key={lvl.index}
                           type="button"
-                          onClick={() => handleSelectHlsLevel(lvl.index, lvl.label)}
+                          onClick={() => handleSelectHlsLevel(-1, 'Auto')}
                           className={`w-full text-left px-2.5 py-1 text-[11px] rounded transition-colors cursor-pointer ${
-                            activeHlsLevel === lvl.index
-                              ? 'text-white'
-                              : 'text-zinc-300 hover:bg-white/10'
+                            activeHlsLevel === -1 ? 'text-white' : 'text-zinc-300 hover:bg-white/10'
                           }`}
                           style={
-                            activeHlsLevel === lvl.index
+                            activeHlsLevel === -1
                               ? { backgroundColor: settings.primaryColor }
                               : undefined
                           }
                         >
-                          {lvl.label}
+                          Auto
                         </button>
-                      ))}
-                    </>
-                  ) : (
-                    (['Auto', '1080p', '720p', '480p'] as QualityOption[]).map((q) => (
-                      <button
-                        key={q}
-                        type="button"
-                        onClick={() => {
-                          setQuality(q);
-                          setQualityMenuOpen(false);
-                        }}
-                        className={`w-full text-left px-2.5 py-1 text-[11px] rounded transition-colors cursor-pointer ${
-                          quality === q ? 'text-white' : 'text-zinc-300 hover:bg-white/10'
-                        }`}
-                        style={quality === q ? { backgroundColor: settings.primaryColor } : undefined}
-                      >
-                        {q}
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
+                        {hlsLevels.map((lvl) => (
+                          <button
+                            key={lvl.index}
+                            type="button"
+                            onClick={() => handleSelectHlsLevel(lvl.index, lvl.label)}
+                            className={`w-full text-left px-2.5 py-1 text-[11px] rounded transition-colors cursor-pointer ${
+                              activeHlsLevel === lvl.index
+                                ? 'text-white'
+                                : 'text-zinc-300 hover:bg-white/10'
+                            }`}
+                            style={
+                              activeHlsLevel === lvl.index
+                                ? { backgroundColor: settings.primaryColor }
+                                : undefined
+                            }
+                          >
+                            {lvl.label}
+                          </button>
+                        ))}
+                      </>
+                    ) : (
+                      (['Auto', '1080p', '720p', '480p'] as QualityOption[]).map((q) => (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => {
+                            setQuality(q);
+                            setQualityMenuOpen(false);
+                          }}
+                          className={`w-full text-left px-2.5 py-1 text-[11px] rounded transition-colors cursor-pointer ${
+                            quality === q ? 'text-white' : 'text-zinc-300 hover:bg-white/10'
+                          }`}
+                          style={quality === q ? { backgroundColor: settings.primaryColor } : undefined}
+                        >
+                          {q}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <button
               type="button"
