@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { ArrowLeft, Eye, EyeOff, Lock, Mail, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 
+import { sanitizeUserError } from '../../utils/errorSanitizer';
+
 interface AdminLoginScreenProps {
   onBackToUserApp: () => void;
 }
@@ -23,12 +25,12 @@ export function AdminLoginScreen({ onBackToUserApp }: AdminLoginScreenProps) {
     try {
       await loginWithEmail(email, password, true);
     } catch (err) {
-      const raw = err instanceof Error ? err.message : 'Erro ao entrar.';
-      let msg = raw;
-      if (raw.includes('auth/configuration-not-found')) {
-        msg = 'Ativa Email/Password no Firebase Console (mozflix-e39cc).';
-      } else if (raw.includes('auth/invalid-credential') || raw.includes('auth/wrong-password')) {
+      const raw = err instanceof Error ? err.message : '';
+      let msg = '';
+      if (raw.includes('auth/invalid-credential') || raw.includes('auth/wrong-password')) {
         msg = 'Email ou senha incorretos.';
+      } else {
+        msg = sanitizeUserError(err, 'Não foi possível entrar agora. Tenta novamente.');
       }
       setError(msg);
       if (msg.toLowerCase().includes('administrador')) {

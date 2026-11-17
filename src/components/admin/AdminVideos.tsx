@@ -41,6 +41,7 @@ import {
   normalizeStreamUrl,
   uploadCoverWithFallback,
 } from '../../utils/mediaUpload';
+import { sanitizeUserError } from '../../utils/errorSanitizer';
 
 interface AdminVideosProps {
   videos: VideoItem[];
@@ -349,11 +350,11 @@ export function AdminVideos({ videos }: AdminVideosProps) {
         coverStoragePath: result.storagePath,
       }));
       setCoverNotice(
-        result.mode === 'storage' ? 'Capa guardada no Storage.' : 'Capa otimizada e aplicada.'
+        result.mode === 'storage' ? 'Capa guardada.' : 'Capa otimizada e aplicada.'
       );
     } catch (err) {
       setCoverProgress(null);
-      setError(err instanceof Error ? err.message : 'Erro ao processar capa.');
+      setError(sanitizeUserError(err, 'Erro ao processar capa.'));
     }
   };
 
@@ -374,9 +375,7 @@ export function AdminVideos({ videos }: AdminVideosProps) {
         // ignore
       }
       setVideoProgress(null);
-      setError(
-        'Upload parado a 0%. Ativa o Firebase Storage na consola ou cola o link direto abaixo.'
-      );
+      setError('Não foi possível enviar o ficheiro. Cola o link direto abaixo.');
     }, 10000);
 
     task.on(
@@ -392,7 +391,7 @@ export function AdminVideos({ videos }: AdminVideosProps) {
         window.clearTimeout(stallTimer);
         if (!stalled) {
           setVideoProgress(null);
-          setError(`Erro no upload: ${err.message}`);
+          setError(sanitizeUserError(err, 'Não foi possível enviar o vídeo. Cola o link direto abaixo.'));
         }
       },
       async () => {
@@ -518,7 +517,7 @@ export function AdminVideos({ videos }: AdminVideosProps) {
       );
       setModalOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro ao guardar.');
+      setError(sanitizeUserError(err, 'Não foi possível guardar. Tenta novamente.'));
     } finally {
       setSaving(false);
     }
@@ -559,7 +558,7 @@ export function AdminVideos({ videos }: AdminVideosProps) {
       );
       setQuickLinkVideo(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro ao atualizar link.');
+      setError(sanitizeUserError(err, 'Não foi possível atualizar o link. Tenta novamente.'));
     } finally {
       setSaving(false);
     }
@@ -605,7 +604,7 @@ export function AdminVideos({ videos }: AdminVideosProps) {
         `Apagou "${video.title}"`
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro ao apagar.');
+      setError(sanitizeUserError(err, 'Não foi possível apagar. Tenta novamente.'));
     }
   };
 

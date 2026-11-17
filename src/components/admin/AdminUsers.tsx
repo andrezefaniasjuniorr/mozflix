@@ -15,6 +15,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { UserProfile } from '../../types/mozflix';
 import { adminBlockUser, logAdminAction } from '../../utils/adminActions';
 import { formatDateMz, formatHoursRemaining, getMillis } from '../../utils/formatters';
+import { reportBackgroundError } from '../../utils/errorSanitizer';
 
 interface AdminUsersProps {
   users: UserProfile[];
@@ -55,6 +56,8 @@ export function AdminUsers({ users }: AdminUsersProps) {
         `+24h para ${u.phone || u.email || u.uid}`
       );
       setFeedback(`+24h aplicados em ${u.phone || u.email}.`);
+    } catch (err) {
+      reportBackgroundError(err);
     } finally {
       setBusyUid(null);
     }
@@ -71,6 +74,8 @@ export function AdminUsers({ users }: AdminUsersProps) {
         adminEmail: adminProfile?.email || 'admin',
       });
       setFeedback(u.isBlocked ? 'Desbloqueado.' : 'Bloqueado.');
+    } catch (err) {
+      reportBackgroundError(err);
     } finally {
       setBusyUid(null);
     }
@@ -90,6 +95,8 @@ export function AdminUsers({ users }: AdminUsersProps) {
         `Removeu deviceId e sessão de ${u.phone || u.email || u.uid}`
       );
       setFeedback('Dispositivo libertado.');
+    } catch (err) {
+      reportBackgroundError(err);
     } finally {
       setBusyUid(null);
     }
@@ -107,6 +114,8 @@ export function AdminUsers({ users }: AdminUsersProps) {
         `Apagou ${u.phone || u.email || u.uid}`
       );
       setFeedback('Utilizador apagado.');
+    } catch (err) {
+      reportBackgroundError(err);
     } finally {
       setBusyUid(null);
     }

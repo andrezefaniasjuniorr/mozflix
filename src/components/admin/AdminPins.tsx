@@ -6,6 +6,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { AdminPackage, PinCode, PinTargetType, VideoItem } from '../../types/mozflix';
 import { adminGeneratePins, logAdminAction } from '../../utils/adminActions';
 import { formatCurrencyMt, formatDateMz } from '../../utils/formatters';
+import { sanitizeUserError } from '../../utils/errorSanitizer';
 
 interface AdminPinsProps {
   pins: PinCode[];
@@ -136,7 +137,7 @@ export function AdminPins({ pins, videos, packages }: AdminPinsProps) {
       setLastCodes(res.codes);
       setFeedback(`${res.count} código(s) gerados para "${packageName}".`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro ao gerar códigos.');
+      setError(sanitizeUserError(err, 'Não foi possível gerar os códigos.'));
     } finally {
       setGenerating(false);
     }

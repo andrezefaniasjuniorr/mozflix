@@ -13,6 +13,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { AdminPackage, VideoItem } from '../../types/mozflix';
 import { adminGeneratePins, logAdminAction } from '../../utils/adminActions';
 import { formatCurrencyMt } from '../../utils/formatters';
+import { sanitizeUserError } from '../../utils/errorSanitizer';
 
 interface AdminPackagesProps {
   packages: AdminPackage[];
@@ -154,7 +155,7 @@ export function AdminPackages({ packages, videos }: AdminPackagesProps) {
       }
       setModalOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro ao guardar pacote.');
+      setError(sanitizeUserError(err, 'Não foi possível guardar o pacote.'));
     } finally {
       setSaving(false);
     }
@@ -212,7 +213,7 @@ export function AdminPackages({ packages, videos }: AdminPackagesProps) {
       });
       setGeneratedCodes(res.codes);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro ao gerar código.');
+      setError(sanitizeUserError(err, 'Não foi possível gerar o código.'));
     } finally {
       setSaving(false);
     }

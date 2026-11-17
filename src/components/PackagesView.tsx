@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp, KeyRound, MessageCircle, Package, ShieldCheck }
 import { useAuth } from '../contexts/AuthContext';
 import { AdminPackage, VideoItem } from '../types/mozflix';
 import { redeemPinCode } from '../utils/adminActions';
+import { sanitizeUserError } from '../utils/errorSanitizer';
 import {
   buildWhatsAppUrl,
   formatCurrencyMt,
@@ -80,11 +81,7 @@ export function PackagesView({ videos = [] }: PackagesViewProps) {
       setPinSuccess(response.message || 'Código ativado com sucesso!');
       setPinInput('');
     } catch (err: unknown) {
-      const message =
-        err instanceof Error
-          ? err.message.replace(/^FirebaseError:\s*/i, '')
-          : 'Código inválido ou expirado.';
-      setPinError(message);
+      setPinError(sanitizeUserError(err, 'Código inválido ou expirado.'));
     } finally {
       setRedeeming(false);
     }

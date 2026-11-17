@@ -7,6 +7,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { redeemPinCode } from '../utils/adminActions';
 import { buildWhatsAppUrl, formatCurrencyMt } from '../utils/formatters';
 import { saveVideoForOffline } from '../utils/offlineStorage';
+import { sanitizeUserError } from '../utils/errorSanitizer';
 
 interface VideoDetailModalProps {
   video: VideoItem | null;
@@ -121,7 +122,7 @@ export function VideoDetailModal({
       setDownloadMsg('Guardado em Downloads.');
       onDownloadComplete();
     } catch (err) {
-      setDownloadErr(err instanceof Error ? err.message : 'Não foi possível transferir.');
+      setDownloadErr(sanitizeUserError(err, 'Não foi possível transferir.'));
     } finally {
       setDownloadingKey(null);
     }
@@ -150,7 +151,7 @@ export function VideoDetailModal({
       setPinMsg(res.message);
       setPinCode('');
     } catch (err) {
-      setPinErr(err instanceof Error ? err.message : 'Código inválido ou já utilizado.');
+      setPinErr(sanitizeUserError(err, 'Código inválido ou já utilizado.'));
     } finally {
       setRedeeming(false);
     }

@@ -5,6 +5,7 @@ import { db } from '../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { AppSettings } from '../../types/mozflix';
 import { logAdminAction } from '../../utils/adminActions';
+import { reportBackgroundError } from '../../utils/errorSanitizer';
 
 export function AdminSettings() {
   const { profile, settings } = useAuth();
@@ -29,6 +30,8 @@ export function AdminSettings() {
         `Definições atualizadas (${form.appName})`
       );
       setSavedMsg('Guardado.');
+    } catch (err) {
+      reportBackgroundError(err);
     } finally {
       setSaving(false);
     }

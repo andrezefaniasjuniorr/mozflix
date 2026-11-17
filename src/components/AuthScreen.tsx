@@ -3,21 +3,14 @@ import { Eye, EyeOff, Lock, Mail, MessageCircle, Phone, ShieldAlert } from 'luci
 import { useAuth } from '../contexts/AuthContext';
 import { buildWhatsAppUrl } from '../utils/formatters';
 
+import { sanitizeUserError } from '../utils/errorSanitizer';
+
 interface AuthScreenProps {
   onNavigateAdmin: () => void;
 }
 
-function mapFirebaseAuthError(err: unknown): string {
+function mapSafeAuthError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
-  if (msg.includes('auth/configuration-not-found')) {
-    return 'Ativa Email/Password no Firebase Console (Authentication -> Sign-in method) para mozflix-e39cc.';
-  }
-  if (msg.includes('auth/operation-not-allowed')) {
-    return 'Método Email/Password desativado no Firebase Console.';
-  }
-  if (msg.includes('auth/unauthorized-domain')) {
-    return 'Domínio não autorizado no Firebase Console (Authorized domains).';
-  }
   if (msg.includes('auth/invalid-credential') || msg.includes('auth/wrong-password')) {
     return 'Dados incorretos.';
   }
@@ -36,7 +29,7 @@ function mapFirebaseAuthError(err: unknown): string {
   if (msg.includes('auth/too-many-requests')) {
     return 'Muitas tentativas. Aguarda.';
   }
-  return msg;
+  return sanitizeUserError(err, 'Não foi possível iniciar sessão agora. Tenta novamente.');
 }
 
 export function AuthScreen({ onNavigateAdmin }: AuthScreenProps) {
@@ -82,7 +75,7 @@ export function AuthScreen({ onNavigateAdmin }: AuthScreenProps) {
         });
       }
     } catch (err) {
-      setLocalError(mapFirebaseAuthError(err));
+      setLocalError(mapSafeAuthError(err));
     } finally {
       setSubmitting(false);
     }

@@ -18,6 +18,7 @@ import { db, functions } from '../firebase';
 import { PinTargetType } from '../types/mozflix';
 import { normalizeMozPhone } from './device';
 import { getMillis } from './formatters';
+import { sanitizeUserError } from './errorSanitizer';
 
 const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
@@ -198,11 +199,7 @@ export async function redeemPinCode(params: {
     };
   } catch (err) {
     if (!isCallableUnavailable(err)) {
-      const msg =
-        err instanceof Error
-          ? err.message.replace(/^FirebaseError:\s*/i, '')
-          : 'Código inválido ou expirado.';
-      throw new Error(msg);
+      throw new Error(sanitizeUserError(err, 'Código inválido ou expirado.'));
     }
   }
 

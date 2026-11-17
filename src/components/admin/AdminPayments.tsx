@@ -5,6 +5,7 @@ import { AdminPackage, ManualPayment, UserProfile, VideoItem } from '../../types
 import { adminActivatePackageManually } from '../../utils/adminActions';
 import { normalizeMozPhone } from '../../utils/device';
 import { formatCurrencyMt, formatDateMz } from '../../utils/formatters';
+import { sanitizeUserError } from '../../utils/errorSanitizer';
 
 interface AdminPaymentsProps {
   users: UserProfile[];
@@ -84,7 +85,7 @@ export function AdminPayments({ users, payments, packages, videos }: AdminPaymen
       setSelectedUid('');
       setPhoneQuery('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Erro ao confirmar.');
+      setError(sanitizeUserError(err, 'Não foi possível confirmar o pagamento.'));
     } finally {
       setSubmitting(false);
     }

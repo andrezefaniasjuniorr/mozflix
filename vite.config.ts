@@ -22,10 +22,9 @@ export default defineConfig(() => {
         ],
         manifest: {
           id: '/',
-          name: 'MozFlix — Cinema e Entretenimento',
+          name: 'MozFlix',
           short_name: 'MozFlix',
-          description:
-            'Plataforma moçambicana de filmes, séries e canais com reprodução offline sem gastar megas.',
+          description: 'Um app de streaming de Filmes, Séries e Canais de TV.',
           theme_color: '#0A0A0C',
           background_color: '#0A0A0C',
           display: 'standalone',
