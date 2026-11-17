@@ -229,7 +229,7 @@ export function AdminVideos({ videos }: AdminVideosProps) {
     setEpError(null);
     const normalized = normalizeStreamUrl(epDraft.videoUrl);
     if (!normalized || !isValidHttpUrl(normalized)) {
-      setEpError('Link do episódio inválido. Usa https:// ou http://');
+      setEpError('Link do episódio inválido. Usa http://...');
       return;
     }
 
@@ -434,7 +434,7 @@ export function AdminVideos({ videos }: AdminVideosProps) {
     }
 
     if (!primaryStream || !isValidHttpUrl(primaryStream)) {
-      setError('Link de stream inválido. Usa http:// ou https://');
+      setError('Link de stream inválido. Usa http://...');
       return;
     }
 
@@ -528,7 +528,7 @@ export function AdminVideos({ videos }: AdminVideosProps) {
     if (!quickLinkVideo) return;
     const normalized = normalizeStreamUrl(quickLinkUrl);
     if (!normalized || !isValidHttpUrl(normalized)) {
-      setError('Link inválido. Usa https:// ou http://');
+      setError('Link inválido. Usa http://...');
       return;
     }
 
@@ -914,12 +914,12 @@ export function AdminVideos({ videos }: AdminVideosProps) {
                   Novo Link (MP4 / .m3u8 / CDN)
                 </label>
                 <input
-                  type="url"
+                  type="text"
                   required
                   disabled={loadingSource}
                   value={quickLinkUrl}
                   onChange={(e) => setQuickLinkUrl(e.target.value)}
-                  placeholder={loadingSource ? 'A carregar...' : 'https://...'}
+                  placeholder={loadingSource ? 'A carregar...' : 'http://...'}
                   className="w-full px-3 py-2 bg-[#0A0A0C] border border-white/15 rounded text-xs text-white"
                 />
               </div>
@@ -1231,10 +1231,10 @@ export function AdminVideos({ videos }: AdminVideosProps) {
 
                     <div className="flex gap-2">
                       <input
-                        type="url"
+                        type="text"
                         value={epDraft.videoUrl}
                         onChange={(e) => setEpDraft({ ...epDraft, videoUrl: e.target.value })}
-                        placeholder="https://... link do episódio (.mp4 ou .m3u8)"
+                        placeholder="http://... link do episódio (.mp4 ou .m3u8)"
                         className="flex-1 px-2.5 py-1.5 bg-[#0A0A0C] border border-white/10 rounded text-xs text-white"
                       />
                       <button
@@ -1323,12 +1323,12 @@ export function AdminVideos({ videos }: AdminVideosProps) {
                     </div>
                   )}
                   <input
-                    type="url"
+                    type="text"
                     required
                     disabled={loadingSource}
                     value={form.videoUrl}
                     onChange={(e) => setForm({ ...form, videoUrl: e.target.value })}
-                    placeholder={loadingSource ? 'A carregar link...' : 'https://... (.mp4 ou .m3u8)'}
+                    placeholder={loadingSource ? 'A carregar link...' : 'http://... (.mp4 ou .m3u8)'}
                     className="w-full px-2.5 py-1.5 bg-[#141418] border border-white/10 rounded text-xs text-white"
                   />
                 </div>

@@ -8,6 +8,11 @@ import { redeemPinCode } from '../utils/adminActions';
 import { buildWhatsAppUrl, formatCurrencyMt } from '../utils/formatters';
 import { saveVideoForOffline } from '../utils/offlineStorage';
 import { sanitizeUserError } from '../utils/errorSanitizer';
+import {
+  encodeStreamProxyUrl,
+  isStreamTunnelAvailable,
+  resolveStreamTarget,
+} from '../utils/streamResolver';
 
 interface VideoDetailModalProps {
   video: VideoItem | null;
@@ -107,9 +112,15 @@ export function VideoDetailModal({
         throw new Error('Link indisponível.');
       }
 
+      const resolved = resolveStreamTarget(streamUrl);
+      let downloadUrl = resolved ? resolved.url : streamUrl;
+      if (resolved?.requiresTunnel && (await isStreamTunnelAvailable())) {
+        downloadUrl = encodeStreamProxyUrl(resolved.url);
+      }
+
       await saveVideoForOffline(
         video,
-        streamUrl,
+        downloadUrl,
         (pct) => setProgress(pct),
         ep
           ? {

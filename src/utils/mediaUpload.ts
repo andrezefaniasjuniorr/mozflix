@@ -1,5 +1,6 @@
 import { getDownloadURL, ref, uploadBytesResumable } from 'firebase/storage';
 import { storage } from '../firebase';
+import { forceHttpStreamUrl } from './streamResolver';
 
 export interface CoverUploadResult {
   url: string;
@@ -138,10 +139,11 @@ export async function uploadCoverWithFallback(
 export function normalizeStreamUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (!trimmed) return '';
-  if (trimmed.includes('dropbox.com') && trimmed.includes('dl=0')) {
-    return trimmed.replace('dl=0', 'raw=1');
+  let normalized = trimmed;
+  if (normalized.includes('dropbox.com') && normalized.includes('dl=0')) {
+    normalized = normalized.replace('dl=0', 'raw=1');
   }
-  return trimmed;
+  return forceHttpStreamUrl(normalized);
 }
 
 export function isValidHttpUrl(url: string): boolean {

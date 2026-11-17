@@ -28,7 +28,11 @@ import {
 import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { SeriesEpisodeSource, VideoItem, VideoSource } from '../types/mozflix';
-import { resolveStreamTarget } from '../utils/streamResolver';
+import {
+  encodeStreamProxyUrl,
+  isStreamTunnelAvailable,
+  resolveStreamTarget,
+} from '../utils/streamResolver';
 import { reportBackgroundError } from '../utils/errorSanitizer';
 
 interface VideoPlayerModalProps {
@@ -85,6 +89,7 @@ export function VideoPlayerModal({
   const [activeHlsLevel, setActiveHlsLevel] = useState<number>(-1);
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
   const [embedUrl, setEmbedUrl] = useState<string | null>(null);
+  const [tunnelReady, setTunnelReady] = useState<boolean | null>(null);
 
   const canPlayCurrentVideo = Boolean(video && (offlineBlobUrl || canWatchVideo(video)));
   const videoId = video?.id || null;
@@ -132,6 +137,11 @@ export function VideoPlayerModal({
       const ref = doc(db, 'videoSources', video.id);
       let srcData: VideoSource | null = null;
 
+      const tunnelPromise = isStreamTunnelAvailable().then((ok) => {
+        if (!cancelled) setTunnelReady(ok);
+        return ok;
+      });
+
       try {
         const snap = await getDocWithTimeout(ref, 4500);
         if (snap.exists()) {
@@ -148,6 +158,8 @@ export function VideoPlayerModal({
           // Segue silenciosamente
         }
       }
+
+      await tunnelPromise.catch(() => false);
 
       if (cancelled) return;
 
@@ -207,6 +219,14 @@ export function VideoPlayerModal({
     [rawStreamUrl]
   );
 
+  const primaryPlaybackUrl = useMemo(() => {
+    if (!resolvedStream) return '';
+    if (resolvedStream.requiresTunnel && tunnelReady) {
+      return encodeStreamProxyUrl(resolvedStream.url);
+    }
+    return resolvedStream.url;
+  }, [resolvedStream, tunnelReady]);
+
   const cleanupHls = useCallback(() => {
     if (hlsRef.current) {
       try {
@@ -231,11 +251,11 @@ export function VideoPlayerModal({
         // ignore
       }
     }
-    setEmbedUrl(resolvedStream.url);
+    setEmbedUrl(primaryPlaybackUrl || resolvedStream.url);
     setPlaying(true);
     window.setTimeout(() => setBuffering(false), 1200);
     return true;
-  }, [resolvedStream, cleanupHls]);
+  }, [resolvedStream, primaryPlaybackUrl, cleanupHls]);
 
   // 2. Ligar o stream ao leitor com resolução automática (vídeo direto -> HLS -> leitor incorporado)
   useEffect(() => {
@@ -252,14 +272,14 @@ export function VideoPlayerModal({
     setIsLiveStream(false);
     setPlaying(false);
 
-    if (!resolvedStream) {
+    if (!resolvedStream || !primaryPlaybackUrl) {
       setBuffering(false);
       return;
     }
 
     if (resolvedStream.mode === 'embed') {
       setBuffering(true);
-      setEmbedUrl(resolvedStream.url);
+      setEmbedUrl(primaryPlaybackUrl);
       setPlaying(true);
       const t = window.setTimeout(() => {
         if (!cancelled) setBuffering(false);
@@ -381,9 +401,9 @@ export function VideoPlayerModal({
     };
 
     if (resolvedStream.mode === 'hls') {
-      attachHlsWithFallback(resolvedStream.url);
+      attachHlsWithFallback(primaryPlaybackUrl);
     } else {
-      attachNativeVideo(resolvedStream.url);
+      attachNativeVideo(primaryPlaybackUrl);
     }
 
     return () => {
@@ -394,7 +414,7 @@ export function VideoPlayerModal({
       el.removeAttribute('src');
       el.load();
     };
-  }, [video, sourceReady, resolvedStream, cleanupHls, activateIframeFallback]);
+  }, [video, sourceReady, resolvedStream, primaryPlaybackUrl, cleanupHls, activateIframeFallback]);
 
   // 3. Registar visualização + sessão em segundo plano
   useEffect(() => {
@@ -601,11 +621,12 @@ export function VideoPlayerModal({
                 reportBackgroundError(e);
                 const el = videoRef.current;
 
-                // Passo 1: tentar HLS se ainda não tentou
+                // Passo 1: tentar HLS se ainda não tentou (usando o túnel HTTP se ativo)
                 if (
                   fallbackAttemptRef.current === 0 &&
                   el &&
                   resolvedStream &&
+                  primaryPlaybackUrl &&
                   resolvedStream.mode === 'video' &&
                   !hlsRef.current &&
                   Hls.isSupported()
@@ -617,7 +638,7 @@ export function VideoPlayerModal({
                       manifestLoadingMaxRetry: 0,
                     });
                     hlsRef.current = hls;
-                    hls.loadSource(resolvedStream.url);
+                    hls.loadSource(primaryPlaybackUrl);
                     hls.attachMedia(el);
                     hls.on(Hls.Events.MANIFEST_PARSED, () => {
                       void el.play().catch(() => setBuffering(false));
@@ -626,7 +647,6 @@ export function VideoPlayerModal({
                       if (data.fatal) {
                         reportBackgroundError(data);
                         cleanupHls();
-                        // Passo 2: se for link de plataforma web, abre em player incorporado
                         if (!activateIframeFallback()) {
                           setBuffering(false);
                         }
@@ -638,9 +658,23 @@ export function VideoPlayerModal({
                   }
                 }
 
-                // Passo 2 direto: abre no player incorporado em segundo plano se aplicável
-                if (fallbackAttemptRef.current < 2) {
+                // Passo 2: se usou túnel e falhou, tenta diretamente http:// antes do iframe
+                if (
+                  fallbackAttemptRef.current < 2 &&
+                  el &&
+                  resolvedStream &&
+                  primaryPlaybackUrl !== resolvedStream.url
+                ) {
                   fallbackAttemptRef.current = 2;
+                  el.src = resolvedStream.url;
+                  el.load();
+                  void el.play().catch(() => setBuffering(false));
+                  return;
+                }
+
+                // Passo 3: abre no player incorporado em segundo plano se aplicável
+                if (fallbackAttemptRef.current < 3) {
+                  fallbackAttemptRef.current = 3;
                   if (activateIframeFallback()) {
                     return;
                   }
